@@ -11,6 +11,7 @@ const {
 } = require('discord.js');
 const fs = require('node:fs');
 const path = require('node:path');
+const { handleMessageAutomod } = require('./utils/automod');
 
 // ===== HTTP SERVER FOR RENDER =====
 
@@ -73,8 +74,16 @@ client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Prefix ping (keep for testing)
-client.on('messageCreate', (message) => {
+// MessageCreate: automod + prefix ping
+client.on('messageCreate', async (message) => {
+  // Run automod first (bad words, spam, etc.)
+  try {
+    await handleMessageAutomod(message);
+  } catch (err) {
+    console.error('[AUTOMOD] Error while processing message:', err);
+  }
+
+  // Simple prefix command (optional)
   if (message.author.bot) return;
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
@@ -105,7 +114,7 @@ client.on('interactionCreate', async (interaction) => {
 
       const payload = {
         content: 'There was an error while executing this command.',
-        ephemeral: true, // deprecation warning is safe to ignore for now
+        ephemeral: true, // safe for now; deprecation warning only
       };
 
       if (interaction.replied || interaction.deferred) {

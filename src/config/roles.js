@@ -5,7 +5,7 @@ module.exports = {
   // Optional: user IDs that should always count as Tier 7 (top power)
   OWNER_IDS: [
     // If you want yourself always Tier 7, put your user ID here as a string:
-    // "525890709841117187",
+    // "",
   ],
 
   // Tier 2: Junior Staff
