@@ -61,18 +61,59 @@ function getWarnings(guildId, userId) {
   return data[guildId][userId] || [];
 }
 
+/**
+ * Clear all warnings for a user in a guild.
+ */
 function clearWarnings(guildId, userId) {
   const data = loadData();
   if (data[guildId] && data[guildId][userId]) {
     delete data[guildId][userId];
+
+    // If guild has no more users with warnings, you can optionally delete the guild entry
+    if (Object.keys(data[guildId]).length === 0) {
+      delete data[guildId];
+    }
+
     saveData(data);
     return true;
   }
   return false;
 }
 
+/**
+ * Remove a single warning by index (0-based) for a user in a guild.
+ *
+ * Returns:
+ *   { removed: warningObject|null, remaining: warningArray }
+ */
+function removeWarning(guildId, userId, index) {
+  const data = loadData();
+  if (!data[guildId] || !Array.isArray(data[guildId][userId])) {
+    return { removed: null, remaining: [] };
+  }
+
+  const list = data[guildId][userId];
+
+  if (index < 0 || index >= list.length) {
+    return { removed: null, remaining: list };
+  }
+
+  const [removed] = list.splice(index, 1);
+
+  if (list.length === 0) {
+    delete data[guildId][userId];
+    if (Object.keys(data[guildId]).length === 0) {
+      delete data[guildId];
+    }
+  }
+
+  saveData(data);
+  return { removed, remaining: list };
+}
+
 module.exports = {
   addWarning,
   getWarnings,
   clearWarnings,
+  removeWarning,
 };
