@@ -5,6 +5,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
+const { logModerationAction } = require('../../utils/modlog');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -25,14 +26,11 @@ module.exports = {
         .setRequired(false),
     ),
 
-  /**
-   * @param {import('discord.js').ChatInputCommandInteraction} interaction
-   */
   async execute(interaction) {
-    // Tier check: Tier 6+ (Corporate and up)
-    if (!atLeastTier(interaction.member, 6)) {
+    // Tier 5+ (Senior Management and up)
+    if (!atLeastTier(interaction.member, 5)) {
       return interaction.reply({
-        content: 'You do not have the permission to execute this command.',
+        content: 'You must be at least **Tier 5 (Senior Management)** to use `/ban`.',
         ephemeral: true,
       });
     }
@@ -60,6 +58,12 @@ module.exports = {
       await interaction.guild.members.ban(user.id, { reason });
       await interaction.reply({
         content: `Banned **${user.tag}**.\nReason: ${reason}`,
+      });
+
+      await logModerationAction(interaction, {
+        action: 'Ban',
+        targetUser: user,
+        reason,
       });
     } catch (error) {
       console.error(error);

@@ -22,14 +22,11 @@ module.exports = {
         .setRequired(false),
     ),
 
-  /**
-   * @param {import('discord.js').ChatInputCommandInteraction} interaction
-   */
   async execute(interaction) {
-    // Tier check: Tier 6+ (Junior Staff and up)
-    if (!atLeastTier(interaction.member, 6)) {
+    // Tier 2+ (Junior Staff and up)
+    if (!atLeastTier(interaction.member, 2)) {
       return interaction.reply({
-        content: 'You can not do that command.',
+        content: 'You must be at least **Tier 2 (Junior Staff)** to use `/clear`.',
         ephemeral: true,
       });
     }

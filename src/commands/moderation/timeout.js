@@ -5,6 +5,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
+const { logModerationAction } = require('../../utils/modlog');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -35,10 +36,10 @@ module.exports = {
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
    */
   async execute(interaction) {
-    // Tier check: Tier 3+ (Intern and up)
+    // Tier 4+ (Management and up)
     if (!atLeastTier(interaction.member, 4)) {
       return interaction.reply({
-        content: 'You can not do that command.',
+        content: 'You must be at least **Tier 4 (Management)** to use `/timeout`.',
         ephemeral: true,
       });
     }
@@ -82,6 +83,14 @@ module.exports = {
       await member.timeout(ms, reason);
       await interaction.reply({
         content: `Timed out **${member.user.tag}** for **${minutes}** minute(s).\nReason: ${reason}`,
+      });
+
+      // Mod log
+      await logModerationAction(interaction, {
+        action: 'Timeout',
+        targetUser: member.user,
+        reason,
+        details: `Duration: ${minutes} minute(s).`,
       });
     } catch (error) {
       console.error(error);

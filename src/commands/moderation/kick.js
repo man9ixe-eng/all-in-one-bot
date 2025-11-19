@@ -5,6 +5,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
+const { logModerationAction } = require('../../utils/modlog');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -29,10 +30,10 @@ module.exports = {
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
    */
   async execute(interaction) {
-    // Tier check: Tier 6+ (Management and up)
-    if (!atLeastTier(interaction.member, 6)) {
+    // Tier 4+ (Management and up)
+    if (!atLeastTier(interaction.member, 4)) {
       return interaction.reply({
-        content: 'You do not have permissions to do that.',
+        content: 'You must be at least **Tier 4 (Management)** to use `/kick`.',
         ephemeral: true,
       });
     }
@@ -66,6 +67,13 @@ module.exports = {
       await member.kick(reason);
       await interaction.reply({
         content: `Kicked **${member.user.tag}**.\nReason: ${reason}`,
+      });
+
+      // Mod log
+      await logModerationAction(interaction, {
+        action: 'Kick',
+        targetUser: member.user,
+        reason,
       });
     } catch (error) {
       console.error(error);
