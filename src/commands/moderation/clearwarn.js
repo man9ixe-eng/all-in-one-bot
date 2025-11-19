@@ -38,9 +38,9 @@ module.exports = {
    */
   async execute(interaction) {
     // Tier 6+ (Corporate / Presidential)
-    if (!atLeastTier(interaction.member, 6)) {
+    if (!atLeastTier(interaction.member, 5)) {
       return interaction.reply({
-        content: 'You must be at least **Tier 6 (Corporate)** to use `/clearwarn`.',
+        content: 'You do you not have permission to use that.`.',
         ephemeral: true,
       });
     }
