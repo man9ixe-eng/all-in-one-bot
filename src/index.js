@@ -12,7 +12,7 @@ const {
 const fs = require('node:fs');
 const path = require('node:path');
 
-// ===== HTTP SERVER FOR RENDER (start this FIRST) =====
+// ===== HTTP SERVER FOR RENDER =====
 
 const PORT = process.env.PORT || 3000;
 
@@ -44,7 +44,8 @@ const client = new Client({
 // Command collection
 client.commands = new Collection();
 
-// Load commands from src/commands/**
+// ===== LOAD COMMANDS (src/commands/**) =====
+
 const commandsPathRoot = path.join(__dirname, 'commands');
 if (fs.existsSync(commandsPathRoot)) {
   const commandFolders = fs.readdirSync(commandsPathRoot);
@@ -66,7 +67,8 @@ if (fs.existsSync(commandsPathRoot)) {
   }
 }
 
-// Events
+// ===== EVENTS =====
+
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
@@ -79,11 +81,12 @@ client.on('messageCreate', (message) => {
   }
 });
 
-// Slash commands
+// Slash commands with safe error handling
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const command = interaction.client.commands.get(interaction.commandName);
+
   if (!command) {
     console.error(`No command matching ${interaction.commandName} was found.`);
     return;
@@ -92,22 +95,45 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await command.execute(interaction);
   } catch (error) {
-    console.error(error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({
+    console.error('Error while executing command:', error);
+
+    // Try to send a generic error message, but DO NOT crash if this fails
+    try {
+      if (typeof interaction.isRepliable === 'function' && !interaction.isRepliable()) {
+        return;
+      }
+
+      const payload = {
         content: 'There was an error while executing this command.',
-        ephemeral: true,
-      });
-    } else {
-      await interaction.reply({
-        content: 'There was an error while executing this command.',
-        ephemeral: true,
-      });
+        ephemeral: true, // deprecation warning is safe to ignore for now
+      };
+
+      if (interaction.replied || interaction.deferred) {
+        interaction.followUp(payload).catch(err => {
+          console.error('Failed to send follow-up error message:', err);
+        });
+      } else {
+        interaction.reply(payload).catch(err => {
+          console.error('Failed to send error reply:', err);
+        });
+      }
+    } catch (err) {
+      console.error('Failed while handling command error:', err);
     }
   }
 });
 
-// ===== LOGIN TO DISCORD (catch errors so process doesn't crash) =====
+// ===== GLOBAL ERROR HANDLERS =====
+
+client.on('error', (error) => {
+  console.error('Discord client error:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+
+// ===== LOGIN TO DISCORD =====
 
 client
   .login(process.env.DISCORD_TOKEN)
