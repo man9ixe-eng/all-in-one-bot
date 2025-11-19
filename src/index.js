@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 
+const http = require('http');
 const {
   Client,
   GatewayIntentBits,
@@ -11,7 +12,8 @@ const {
 const fs = require('node:fs');
 const path = require('node:path');
 
-// Create the client
+// ===== DISCORD CLIENT SETUP =====
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -19,16 +21,16 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessageReactions
+    GatewayIntentBits.GuildMessageReactions,
   ],
   partials: [
     Partials.Message,
     Partials.Channel,
-    Partials.Reaction
-  ]
+    Partials.Reaction,
+  ],
 });
 
-// ========== COMMAND HANDLER SETUP ==========
+// ===== COMMAND HANDLER =====
 
 client.commands = new Collection();
 
@@ -52,13 +54,13 @@ for (const folder of commandFolders) {
   }
 }
 
-// ========== EVENTS ==========
+// ===== EVENTS =====
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Prefix-based test command (keep for now)
+// Keep prefix ping for now
 client.on('messageCreate', (message) => {
   if (message.author.bot) return;
 
@@ -67,7 +69,7 @@ client.on('messageCreate', (message) => {
   }
 });
 
-// Handle slash commands
+// Slash commands
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -83,13 +85,32 @@ client.on('interactionCreate', async (interaction) => {
   } catch (error) {
     console.error(error);
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: 'There was an error while executing this command.', ephemeral: true });
+      await interaction.followUp({
+        content: 'There was an error while executing this command.',
+        ephemeral: true,
+      });
     } else {
-      await interaction.reply({ content: 'There was an error while executing this command.', ephemeral: true });
+      await interaction.reply({
+        content: 'There was an error while executing this command.',
+        ephemeral: true,
+      });
     }
   }
 });
 
-// ========== LOGIN ==========
+// ===== LOGIN TO DISCORD =====
 
 client.login(process.env.DISCORD_TOKEN);
+
+// ===== TINY HTTP SERVER FOR RENDER (FREE) =====
+
+// Render sets PORT in the environment for Web Services.
+// We just listen on it so Render is happy and stops timing out the service.
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Glace bot is running.\n');
+}).listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
