@@ -8,8 +8,25 @@ const roles = require('../config/roles');
  * @param {string[]} roleIds
  */
 function hasAnyRole(member, roleIds = []) {
-  if (!member || !member.roles) return false;
-  return member.roles.cache.some(role => roleIds.includes(role.id));
+  if (!member) return false;
+
+  // Normalize configured IDs to strings
+  const configured = new Set((roleIds || []).map(id => String(id)));
+
+  let memberRoleIds = [];
+
+  // Case 1: Normal GuildMember with roles cache
+  if (member.roles && member.roles.cache) {
+    memberRoleIds = Array.from(member.roles.cache.keys());
+  }
+  // Case 2: API-style member where roles is an array of IDs
+  else if (member.roles && Array.isArray(member.roles)) {
+    memberRoleIds = member.roles.map(String);
+  }
+
+  if (memberRoleIds.length === 0) return false;
+
+  return memberRoleIds.some(id => configured.has(String(id)));
 }
 
 /**
