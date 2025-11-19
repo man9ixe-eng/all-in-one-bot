@@ -12,6 +12,17 @@ const {
 const fs = require('node:fs');
 const path = require('node:path');
 
+// ===== HTTP SERVER FOR RENDER (start this FIRST) =====
+
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Glace bot is running.\n');
+}).listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
+
 // ===== DISCORD CLIENT SETUP =====
 
 const client = new Client({
@@ -30,40 +41,39 @@ const client = new Client({
   ],
 });
 
-// ===== COMMAND HANDLER =====
-
+// Command collection
 client.commands = new Collection();
 
+// Load commands from src/commands/**
 const commandsPathRoot = path.join(__dirname, 'commands');
-const commandFolders = fs.readdirSync(commandsPathRoot);
+if (fs.existsSync(commandsPathRoot)) {
+  const commandFolders = fs.readdirSync(commandsPathRoot);
+  for (const folder of commandFolders) {
+    const commandsPath = path.join(commandsPathRoot, folder);
+    const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
 
-for (const folder of commandFolders) {
-  const commandsPath = path.join(commandsPathRoot, folder);
-  const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+    for (const file of commandFiles) {
+      const filePath = path.join(commandsPath, file);
+      const command = require(filePath);
 
-  for (const file of commandFiles) {
-    const filePath = path.join(commandsPath, file);
-    const command = require(filePath);
-
-    if ('data' in command && 'execute' in command) {
-      client.commands.set(command.data.name, command);
-      console.log(`[COMMAND] Loaded /${command.data.name} from ${filePath}`);
-    } else {
-      console.log(`[WARN] Command at ${filePath} is missing "data" or "execute". Skipping.`);
+      if ('data' in command && 'execute' in command) {
+        client.commands.set(command.data.name, command);
+        console.log(`[COMMAND] Loaded /${command.data.name} from ${filePath}`);
+      } else {
+        console.log(`[WARN] Command at ${filePath} is missing "data" or "execute". Skipping.`);
+      }
     }
   }
 }
 
-// ===== EVENTS =====
-
+// Events
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Keep prefix ping for now
+// Prefix ping (keep for testing)
 client.on('messageCreate', (message) => {
   if (message.author.bot) return;
-
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
@@ -74,7 +84,6 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const command = interaction.client.commands.get(interaction.commandName);
-
   if (!command) {
     console.error(`No command matching ${interaction.commandName} was found.`);
     return;
@@ -98,19 +107,10 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ===== LOGIN TO DISCORD =====
+// ===== LOGIN TO DISCORD (catch errors so process doesn't crash) =====
 
-client.login(process.env.DISCORD_TOKEN);
-
-// ===== TINY HTTP SERVER FOR RENDER (FREE) =====
-
-// Render sets PORT in the environment for Web Services.
-// We just listen on it so Render is happy and stops timing out the service.
-const PORT = process.env.PORT || 3000;
-
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Glace bot is running.\n');
-}).listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+client
+  .login(process.env.DISCORD_TOKEN)
+  .catch((err) => {
+    console.error('Failed to login to Discord:', err);
+  });
