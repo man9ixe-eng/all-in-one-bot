@@ -14,6 +14,13 @@ module.exports = {
     .setDescription('Lock a channel (prevent @everyone from sending messages).')
     .setDMPermission(false)
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    // REQUIRED option MUST come before optional ones
+    .addStringOption(option =>
+      option
+        .setName('reason')
+        .setDescription('Reason for locking the channel.')
+        .setRequired(true),
+    )
     .addChannelOption(option =>
       option
         .setName('channel')
@@ -25,12 +32,6 @@ module.exports = {
           ChannelType.PrivateThread,
         )
         .setRequired(false),
-    )
-    .addStringOption(option =>
-      option
-        .setName('reason')
-        .setDescription('Reason for locking the channel.')
-        .setRequired(true),
     ),
 
   /**
@@ -45,8 +46,8 @@ module.exports = {
       });
     }
 
-    const channelOption = interaction.options.getChannel('channel');
     const reason = interaction.options.getString('reason', true);
+    const channelOption = interaction.options.getChannel('channel');
     const targetChannel = channelOption || interaction.channel;
 
     if (!targetChannel || targetChannel.guildId !== interaction.guildId) {
@@ -66,9 +67,11 @@ module.exports = {
     const everyoneRole = interaction.guild.roles.everyone;
 
     try {
-      await targetChannel.permissionOverwrites.edit(everyoneRole, {
-        SendMessages: false,
-      }, { reason: `Channel locked by ${interaction.user.tag}: ${reason}` });
+      await targetChannel.permissionOverwrites.edit(
+        everyoneRole,
+        { SendMessages: false },
+        { reason: `Channel locked by ${interaction.user.tag}: ${reason}` },
+      );
 
       await interaction.reply({
         content: `🔒 Locked ${targetChannel}.\nReason: ${reason}`,

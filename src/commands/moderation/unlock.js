@@ -14,6 +14,13 @@ module.exports = {
     .setDescription('Unlock a channel (restore @everyone ability to send messages).')
     .setDMPermission(false)
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    // REQUIRED first
+    .addStringOption(option =>
+      option
+        .setName('reason')
+        .setDescription('Reason for unlocking the channel.')
+        .setRequired(true),
+    )
     .addChannelOption(option =>
       option
         .setName('channel')
@@ -25,12 +32,6 @@ module.exports = {
           ChannelType.PrivateThread,
         )
         .setRequired(false),
-    )
-    .addStringOption(option =>
-      option
-        .setName('reason')
-        .setDescription('Reason for unlocking the channel.')
-        .setRequired(true),
     ),
 
   /**
@@ -45,8 +46,8 @@ module.exports = {
       });
     }
 
-    const channelOption = interaction.options.getChannel('channel');
     const reason = interaction.options.getString('reason', true);
+    const channelOption = interaction.options.getChannel('channel');
     const targetChannel = channelOption || interaction.channel;
 
     if (!targetChannel || targetChannel.guildId !== interaction.guildId) {
@@ -66,10 +67,12 @@ module.exports = {
     const everyoneRole = interaction.guild.roles.everyone;
 
     try {
-      // Set SendMessages to null to inherit from channel/server defaults
-      await targetChannel.permissionOverwrites.edit(everyoneRole, {
-        SendMessages: null,
-      }, { reason: `Channel unlocked by ${interaction.user.tag}: ${reason}` });
+      // Reset SendMessages to inherit defaults
+      await targetChannel.permissionOverwrites.edit(
+        everyoneRole,
+        { SendMessages: null },
+        { reason: `Channel unlocked by ${interaction.user.tag}: ${reason}` },
+      );
 
       await interaction.reply({
         content: `🔓 Unlocked ${targetChannel}.\nReason: ${reason}`,

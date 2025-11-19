@@ -5,22 +5,67 @@ const { atLeastTier } = require('../../utils/permissions');
 const { createSessionCard } = require('../../utils/trelloClient');
 const { logModerationAction } = require('../../utils/modlog');
 
+// Build ISO string from:
+// dateStr: "MM/DD/YYYY"  (e.g. "11/19/2025")
+// timeStr: "h:mm AM/PM" (e.g. "4:00 PM")
 function buildISOFromDateTime(dateStr, timeStr) {
-  // Expect dateStr: YYYY-MM-DD, timeStr: HH:MM
-  const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
-  const timeOk = /^\d{2}:\d{2}$/.test(timeStr);
-  if (!dateOk || !timeOk) {
-    const error = new Error('INVALID_DATETIME');
-    error.code = 'INVALID_DATETIME';
-    throw error;
+  const date = (dateStr || '').trim();
+  const time = (timeStr || '').trim();
+
+  // Date: MM/DD/YYYY
+  const dateMatch = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!dateMatch) {
+    return null;
   }
 
-  const [year, month, day] = dateStr.split('-').map(Number);
-  const [hour, minute] = timeStr.split(':').map(Number);
+  const [, monthStr, dayStr, yearStr] = dateMatch;
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  const year = Number(yearStr);
+
+  if (
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    !Number.isInteger(year) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
+  }
+
+  // Time: h:mm AM/PM
+  const timeMatch = time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!timeMatch) {
+    return null;
+  }
+
+  const [, hourStr, minuteStr, ampmRaw] = timeMatch;
+  let hour = Number(hourStr);
+  const minute = Number(minuteStr);
+  const ampm = ampmRaw.toUpperCase();
+
+  if (
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    hour < 1 ||
+    hour > 12 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  // Convert to 24-hour
+  let hour24 = hour % 12; // 12 -> 0
+  if (ampm === 'PM') {
+    hour24 += 12;
+  }
 
   const d = new Date();
   d.setFullYear(year, month - 1, day);
-  d.setHours(hour, minute, 0, 0);
+  d.setHours(hour24, minute, 0, 0);
 
   return d.toISOString();
 }
@@ -50,13 +95,13 @@ module.exports = {
     .addStringOption(option =>
       option
         .setName('date')
-        .setDescription('Date (YYYY-MM-DD).')
+        .setDescription('Date (MM/DD/YYYY), e.g. 11/19/2025.')
         .setRequired(true),
     )
     .addStringOption(option =>
       option
         .setName('time')
-        .setDescription('Time (HH:MM, 24-hour).')
+        .setDescription('Time (h:mm AM/PM), e.g. 4:00 PM.')
         .setRequired(true),
     )
     .addStringOption(option =>
@@ -70,34 +115,29 @@ module.exports = {
    * /addsession – Tier 4+ (Management and up)
    */
   async execute(interaction) {
-    if (!atLeastTier(interaction.member, 6)) {
+    if (!atLeastTier(interaction.member, 4)) {
       return interaction.reply({
-        content: 'You must be at least **(Corporate)** to use `/addsession`.',
+        content: 'You must be at least **Tier 4 (Management)** to use `/addsession`.',
         ephemeral: true,
       });
     }
 
     const sessionType = interaction.options.getString('type', true);
     const title = interaction.options.getString('title', true);
-    const dateStr = interaction.options.getString('date', true);
-    const timeStr = interaction.options.getString('time', true);
+    const dateStr = interaction.options.getString('date', true); // MM/DD/YYYY
+    const timeStr = interaction.options.getString('time', true); // h:mm AM/PM
     const notes = interaction.options.getString('notes') || '';
 
-    let dueISO = null;
+    // Build due date
+    const dueISO = buildISOFromDateTime(dateStr, timeStr);
 
-    try {
-      dueISO = buildISOFromDateTime(dateStr, timeStr);
-    } catch (err) {
-      if (err.code === 'INVALID_DATETIME') {
-        return interaction.reply({
-          content:
-            'Invalid date/time format.\nPlease use **YYYY-MM-DD** for date and **HH:MM** (24-hour) for time.',
-          ephemeral: true,
-        });
-      }
-      console.error('[ADDSESSION] Date/time parse error:', err);
+    if (!dueISO) {
       return interaction.reply({
-        content: 'Something went wrong while parsing the date/time.',
+        content:
+          'Invalid date or time format.\n' +
+          '**Use this format exactly:**\n' +
+          '• Date: `MM/DD/YYYY` (example: `11/19/2025`)\n' +
+          '• Time: `h:mm AM/PM` (example: `4:00 PM`)',
         ephemeral: true,
       });
     }
