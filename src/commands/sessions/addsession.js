@@ -3,7 +3,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
 const { createSessionCard } = require('../../utils/trelloClient');
-const { logModerationAction } = require('../../utils/modlog');
 
 // Build ISO string from:
 // dateStr: "MM/DD/YYYY"  (e.g. "11/19/2025")
@@ -14,9 +13,7 @@ function buildISOFromDateTime(dateStr, timeStr) {
 
   // Date: MM/DD/YYYY
   const dateMatch = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (!dateMatch) {
-    return null;
-  }
+  if (!dateMatch) return null;
 
   const [, monthStr, dayStr, yearStr] = dateMatch;
   const month = Number(monthStr);
@@ -37,9 +34,7 @@ function buildISOFromDateTime(dateStr, timeStr) {
 
   // Time: h:mm AM/PM
   const timeMatch = time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (!timeMatch) {
-    return null;
-  }
+  if (!timeMatch) return null;
 
   const [, hourStr, minuteStr, ampmRaw] = timeMatch;
   let hour = Number(hourStr);
@@ -67,7 +62,9 @@ function buildISOFromDateTime(dateStr, timeStr) {
   d.setFullYear(year, month - 1, day);
   d.setHours(hour24, minute, 0, 0);
 
-  return d.toISOString();
+  // Convert to UTC ISO string (fixes Trello showing wrong timezone)
+  const utcISO = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+  return utcISO;
 }
 
 module.exports = {
@@ -124,13 +121,11 @@ module.exports = {
 
     const sessionType = interaction.options.getString('type', true);
     const title = interaction.options.getString('title', true);
-    const dateStr = interaction.options.getString('date', true); // MM/DD/YYYY
-    const timeStr = interaction.options.getString('time', true); // h:mm AM/PM
+    const dateStr = interaction.options.getString('date', true);
+    const timeStr = interaction.options.getString('time', true);
     const notes = interaction.options.getString('notes') || '';
 
-    // Build due date
     const dueISO = buildISOFromDateTime(dateStr, timeStr);
-
     if (!dueISO) {
       return interaction.reply({
         content:
@@ -142,41 +137,29 @@ module.exports = {
       });
     }
 
-    try {
-      const card = await createSessionCard({
-        sessionType,
-        title,
-        dueISO,
-        notes,
-        hostTag: interaction.user.tag,
-        hostId: interaction.user.id,
-      });
+    const ok = await createSessionCard({
+      sessionType,
+      title,
+      dueISO,
+      notes,
+      hostTag: interaction.user.tag,
+      hostId: interaction.user.id,
+    });
 
-      const humanType =
-        sessionType === 'interview'
-          ? 'Interview'
-          : sessionType === 'training'
-          ? 'Training'
-          : 'Mass Shift';
-
-      await interaction.reply({
+    if (!ok) {
+      return interaction.reply({
         content:
-          `Created **${humanType}** session card:\n` +
-          `${card.shortUrl || card.url || '(no URL returned)'}`,
-        ephemeral: true,
-      });
-
-      await logModerationAction(interaction, {
-        action: 'Session Scheduled',
-        reason: `${humanType} – ${title}`,
-        details: `Card: ${card.shortUrl || card.url || card.id}`,
-      });
-    } catch (err) {
-      console.error('[ADDSESSION] Failed to create Trello card:', err);
-      await interaction.reply({
-        content: 'I could not create the Trello card. Check my Trello config and try again.',
+          'I tried to create the Trello card but something went wrong.\n' +
+          'Please check the board manually and verify your Trello IDs in `.env`.',
         ephemeral: true,
       });
     }
+
+    return interaction.reply({
+      content:
+        '✅ Session successfully added to Trello!\n' +
+        'Use `/cancelsession` with the card link if you need to cancel it later.',
+      ephemeral: true,
+    });
   },
 };
