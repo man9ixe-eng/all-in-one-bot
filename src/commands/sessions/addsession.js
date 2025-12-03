@@ -4,9 +4,26 @@ const { SlashCommandBuilder } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
 const { createSessionCard } = require('../../utils/trelloClient');
 
+// Map timezone abbreviation → offset in minutes from UTC
+// (approx; good enough for sessions)
+const TZ_OFFSETS = {
+  EST: -300,
+  EDT: -240,
+  ET: -300,
+  CST: -360,
+  CDT: -300,
+  CT: -360,
+  MST: -420,
+  MDT: -360,
+  MT: -420,
+  PST: -480,
+  PDT: -420,
+  PT: -480,
+};
+
 // Build ISO string from:
 // dateStr: "MM/DD/YYYY"  (e.g. "11/19/2025")
-// timeStr: "h:mm AM/PM" (e.g. "4:00 PM")
+// timeStr: "h:mm AM/PM [TZ]" (e.g. "11:00 AM EST" or "11:00 AM")
 function buildISOFromDateTime(dateStr, timeStr) {
   const date = (dateStr || '').trim();
   const time = (timeStr || '').trim();
@@ -32,14 +49,19 @@ function buildISOFromDateTime(dateStr, timeStr) {
     return null;
   }
 
-  // Time: h:mm AM/PM
-  const timeMatch = time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  // Time: h:mm AM/PM [TZ]
+  // Examples that will match:
+  // "11:00 AM"
+  // "11:00 AM EST"
+  // "9:30 pm pst"
+  const timeMatch = time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(?:\s+([A-Za-z]{2,5}))?$/i);
   if (!timeMatch) return null;
 
-  const [, hourStr, minuteStr, ampmRaw] = timeMatch;
+  const [, hourStr, minuteStr, ampmRaw, tzAbbrRaw] = timeMatch;
   let hour = Number(hourStr);
   const minute = Number(minuteStr);
   const ampm = ampmRaw.toUpperCase();
+  const tzAbbr = tzAbbrRaw ? tzAbbrRaw.toUpperCase() : null;
 
   if (
     !Number.isInteger(hour) ||
@@ -58,12 +80,22 @@ function buildISOFromDateTime(dateStr, timeStr) {
     hour24 += 12;
   }
 
-  const d = new Date();
-  d.setFullYear(year, month - 1, day);
-  d.setHours(hour24, minute, 0, 0);
+  // Determine timezone offset (minutes from UTC)
+  let offsetMinutes;
+  if (tzAbbr && TZ_OFFSETS[tzAbbr] !== undefined) {
+    offsetMinutes = TZ_OFFSETS[tzAbbr];
+  } else {
+    // Default to Eastern Time if no timezone given
+    offsetMinutes = TZ_OFFSETS.ET;
+  }
 
-  // Convert to UTC ISO string (fixes Trello showing wrong timezone)
-  const utcISO = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+  // Build a "local" time in that timezone, then convert to UTC.
+  // We treat the typed time as if it's local in that TZ.
+  const localAsUTC = Date.UTC(year, month - 1, day, hour24, minute, 0, 0);
+  // local = UTC + offset  →  UTC = local - offset
+  const utcMs = localAsUTC - offsetMinutes * 60_000;
+  const utcISO = new Date(utcMs).toISOString();
+
   return utcISO;
 }
 
@@ -98,7 +130,7 @@ module.exports = {
     .addStringOption(option =>
       option
         .setName('time')
-        .setDescription('Time (h:mm AM/PM), e.g. 4:00 PM.')
+        .setDescription('Time (h:mm AM/PM [TZ]), e.g. "11:00 AM EST" or "11:00 AM".')
         .setRequired(true),
     )
     .addStringOption(option =>
@@ -132,7 +164,7 @@ module.exports = {
           'Invalid date or time format.\n' +
           '**Use this format exactly:**\n' +
           '• Date: `MM/DD/YYYY` (example: `11/19/2025`)\n' +
-          '• Time: `h:mm AM/PM` (example: `4:00 PM`)',
+          '• Time: `h:mm AM/PM [TZ]` (examples: `11:00 AM`, `11:00 AM EST`)',
         ephemeral: true,
       });
     }
@@ -150,7 +182,7 @@ module.exports = {
       return interaction.reply({
         content:
           'I tried to create the Trello card but something went wrong.\n' +
-          'Please check the board manually and verify your Trello IDs in `.env`.',
+          'Please check the board manually and verify your Trello IDs in `.env` / Render env.',
         ephemeral: true,
       });
     }
@@ -158,7 +190,7 @@ module.exports = {
     return interaction.reply({
       content:
         '✅ Session successfully added to Trello!\n' +
-        'Use `/cancelsession` with the card link if you need to cancel it later.',
+        'Use `/cancelsession` (with the card link) to cancel, or `/logsession` to mark it completed.',
       ephemeral: true,
     });
   },
