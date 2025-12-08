@@ -7,7 +7,11 @@ const STORE_PATH = path.join(DATA_DIR, 'sessionPosts.json');
 
 let store = {};
 
+<<<<<<< HEAD
 // Load from disk
+=======
+// Load existing store (if any)
+>>>>>>> dc15838f735a5c8333e499f72f63d8183400845f
 function loadStore() {
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
