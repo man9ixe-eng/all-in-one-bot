@@ -23,11 +23,8 @@ module.exports = {
         .setRequired(true),
     ),
 
-  /**
-   * /cancelsession – Tier 5+ (Senior Management and up)
-   */
+  // /cancelsession – Tier 5+ (Senior Management and up)
   async execute(interaction) {
-    // Tier check
     if (!atLeastTier(interaction.member, 5)) {
       return interaction.reply({
         content: 'You must be at least **Tier 5 (Senior Management)** to use `/cancelsession`.',
@@ -38,10 +35,7 @@ module.exports = {
     const cardInput = interaction.options.getString('card', true).trim();
     const reason = interaction.options.getString('reason', true).trim();
 
-    // Accept either full Trello link or raw ID / shortLink
-    // Examples:
-    //  - https://trello.com/c/AbCd1234/some-card-name
-    //  - AbCd1234
+    // Accept full Trello link or raw ID
     const match = cardInput.match(/(?:https:\/\/trello\.com\/c\/)?([A-Za-z0-9]+)/);
     const cardId = match ? match[1] : null;
 
@@ -53,8 +47,7 @@ module.exports = {
     }
 
     try {
-      const success = await cancelSessionCard({ cardId, reason });
-
+      const success = await cancelSessionCard(cardId, reason);
       if (!success) {
         return interaction.reply({
           content:
@@ -64,7 +57,6 @@ module.exports = {
         });
       }
 
-      // Remove any “session starting soon” post for this card
       await deleteSessionAnnouncement(interaction.client, cardId).catch(() => {});
 
       return interaction.reply({
