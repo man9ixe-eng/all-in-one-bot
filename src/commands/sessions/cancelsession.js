@@ -3,96 +3,80 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
 const { cancelSessionCard } = require('../../utils/trelloClient');
-const { deleteSessionAnnouncement } = require('../../utils/sessionAutomation');
-const { logModerationAction } = require('../../utils/modlog');
-
-// Extract a Trello card ID/shortID from a raw string or URL
-function extractCardId(input) {
-  if (!input) return null;
-  const trimmed = input.trim();
-
-  // URL like https://trello.com/c/abcd1234/...
-  const urlMatch = trimmed.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
-  if (urlMatch) return urlMatch[1];
-
-  // Fallback: grab a 8–24 char alphanumeric chunk
-  const idMatch = trimmed.match(/([A-Za-z0-9]{8,24})/);
-  if (idMatch) return idMatch[1];
-
-  return null;
-}
+const { deleteSessionAnnouncement } = require('../../utils/sessionAnnouncements');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('cancelsession')
-    .setDescription('Cancel a scheduled session by Trello card link or ID.')
+    .setDescription('Cancels a Trello session card (applies Canceled label and moves it).')
     .setDMPermission(false)
-    .addStringOption((option) =>
+    .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or ID')
+        .setDescription('Trello card link or ID to cancel.')
         .setRequired(true),
     )
-    .addStringOption((option) =>
+    .addStringOption(option =>
       option
         .setName('reason')
-        .setDescription('Reason for cancellation')
+        .setDescription('Reason for cancellation.')
         .setRequired(true),
     ),
 
   /**
-   * /cancelsession – Tier 4+ (Management and up)
+   * /cancelsession – Tier 5+ (Senior Management and up)
    */
   async execute(interaction) {
-    if (!atLeastTier(interaction.member, 4)) {
+    // Tier check
+    if (!atLeastTier(interaction.member, 5)) {
       return interaction.reply({
-        content:
-          'You must be at least **Tier 4 (Management)** to use `/cancelsession`.',
+        content: 'You must be at least **Tier 5 (Senior Management)** to use `/cancelsession`.',
         ephemeral: true,
       });
     }
 
-    const cardInput = interaction.options.getString('card', true);
-    const reason = interaction.options.getString('reason', true);
+    const cardInput = interaction.options.getString('card', true).trim();
+    const reason = interaction.options.getString('reason', true).trim();
 
-    const cardId = extractCardId(cardInput);
+    // Accept either full Trello link or raw ID / shortLink
+    // Examples:
+    //  - https://trello.com/c/AbCd1234/some-card-name
+    //  - AbCd1234
+    const match = cardInput.match(/(?:https:\/\/trello\.com\/c\/)?([A-Za-z0-9]+)/);
+    const cardId = match ? match[1] : null;
+
     if (!cardId) {
       return interaction.reply({
-        content:
-          'I could not detect a valid Trello card ID from your input.\n' +
-          'Please provide a Trello card link or ID.',
+        content: 'That does not look like a valid Trello card link or ID.',
         ephemeral: true,
       });
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    try {
+      const success = await cancelSessionCard({ cardId, reason });
 
-    const success = await cancelSessionCard({ cardId, reason });
+      if (!success) {
+        return interaction.reply({
+          content:
+            'I tried to cancel that session on Trello, but something went wrong.\n' +
+            'Please double-check the card link/ID and my Trello configuration.',
+          ephemeral: true,
+        });
+      }
 
-    if (!success) {
-      return interaction.editReply({
-        content:
-          'I tried to cancel that session on Trello, but something went wrong.\n' +
-          'Please double-check the card and my Trello configuration.',
+      // Remove any “session starting soon” post for this card
+      await deleteSessionAnnouncement(interaction.client, cardId).catch(() => {});
+
+      return interaction.reply({
+        content: '🚫 Session has been **canceled** on Trello and its notice has been removed.',
+        ephemeral: true,
+      });
+    } catch (err) {
+      console.error('[CANCELSESSION] Error:', err);
+      return interaction.reply({
+        content: 'There was an error while executing this command.',
+        ephemeral: true,
       });
     }
-
-    // Delete any “session starting soon” post tied to this card
-    await deleteSessionAnnouncement(interaction.client, cardId).catch(() => {});
-
-    const trelloUrl = `https://trello.com/c/${cardId}`;
-
-    await interaction.editReply({
-      content:
-        `✅ Session has been **canceled** and moved to the completed list.\n` +
-        `Card: ${trelloUrl}`,
-    });
-
-    // Log to modlog, if configured
-    await logModerationAction(interaction, {
-      action: 'Session Canceled',
-      reason,
-      details: `Card: ${trelloUrl}`,
-    }).catch(() => {});
   },
 };
