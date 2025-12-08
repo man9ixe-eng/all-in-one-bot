@@ -2,65 +2,63 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
-const { markSessionCompleted } = require('../../utils/trelloClient');
-const { logModerationAction } = require('../../utils/modlog');
+const { completeSessionCard } = require('../../utils/trelloClient');
+const { deleteSessionAnnouncement } = require('../../utils/sessionAnnouncements');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('logsession')
-    .setDescription('Mark a Trello session as completed.')
+    .setDescription('Marks a Trello session card as completed.')
     .setDMPermission(false)
     .addStringOption(option =>
       option
-        .setName('card_link')
-        .setDescription('Trello card link or ID for the session.')
+        .setName('card')
+        .setDescription('Trello card link or ID.')
         .setRequired(true),
-    )
-    .addStringOption(option =>
-      option
-        .setName('notes')
-        .setDescription('Optional notes (e.g. attendees, passes).')
-        .setRequired(false),
     ),
 
   /**
    * /logsession – Tier 4+ (Management and up)
    */
   async execute(interaction) {
-    if (!atLeastTier(interaction.member, 6)) {
+    if (!atLeastTier(interaction.member, 4)) {
       return interaction.reply({
-        content: 'You must be at least Corproate to use `/logsession`.',
+        content: 'You must be at least **Tier 4 (Management)** to use `/logsession`.',
         ephemeral: true,
       });
     }
 
-    const cardLink = interaction.options.getString('card_link', true);
-    const notes = interaction.options.getString('notes') || '';
+    const cardInput = interaction.options.getString('card', true).trim();
+    const cardMatch = cardInput.match(/(?:https:\/\/trello\.com\/c\/)?([a-zA-Z0-9]+)/);
+    const cardId = cardMatch ? cardMatch[1] : null;
 
-    try {
-      const updatedCard = await markSessionCompleted(cardLink, {
-        reason: notes,
-        actorTag: interaction.user.tag,
-        actorId: interaction.user.id,
-      });
-
-      await interaction.reply({
-        content:
-          `Marked session as **COMPLETED** and moved to Completed list.\n` +
-          `Card: ${updatedCard.shortUrl || updatedCard.url || updatedCard.id}`,
+    if (!cardId) {
+      return interaction.reply({
+        content: 'Invalid Trello card link or ID provided.',
         ephemeral: true,
       });
+    }
 
-      await logModerationAction(interaction, {
-        action: 'Session Completed',
-        reason: notes || 'No notes provided',
-        details: `Card: ${updatedCard.shortUrl || updatedCard.url || updatedCard.id}`,
+    try {
+      const success = await completeSessionCard({ cardId });
+      if (!success) {
+        return interaction.reply({
+          content:
+            'I could not mark that session as completed. Please verify the Trello card link and try again.',
+          ephemeral: true,
+        });
+      }
+
+      await deleteSessionAnnouncement(interaction.client, cardId).catch(() => {});
+
+      return interaction.reply({
+        content: `✅ Successfully marked the session as **completed** and removed its scheduled announcement.`,
+        ephemeral: true,
       });
     } catch (err) {
-      console.error('[LOGSESSION] Failed to complete session:', err);
-      await interaction.reply({
-        content:
-          'I could not log that Trello session. Check the card link and my Trello config.',
+      console.error('[LOGSESSION] Error:', err);
+      return interaction.reply({
+        content: 'There was an error while executing this command.',
         ephemeral: true,
       });
     }
