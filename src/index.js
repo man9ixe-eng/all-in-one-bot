@@ -1,112 +1,163 @@
 // src/index.js
+
 require('dotenv').config();
 
-const fs = require('fs');
-const path = require('path');
 const http = require('http');
 const {
   Client,
-  Collection,
   GatewayIntentBits,
   Partials,
-  Events,
+  Collection,
 } = require('discord.js');
+const fs = require('node:fs');
+const path = require('node:path');
+const { handleMessageAutomod } = require('./utils/automod');
+const { runSessionAnnouncementTick } = require('./utils/sessionAnnouncements');
 
-const { runSessionAutomation } = require('./utils/sessionAutomation');
+// ===== HTTP SERVER FOR RENDER =====
 
-// Create Discord client
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Glace bot is running.\n');
+}).listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
+
+// ===== DISCORD CLIENT SETUP =====
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction,
+  ],
 });
 
+// Command collection
 client.commands = new Collection();
 
-// Load commands from src/commands/*/*.js
-const foldersPath = path.join(__dirname, 'commands');
-const commandFolders = fs.readdirSync(foldersPath);
+// ===== LOAD COMMANDS (src/commands/**) =====
 
-for (const folder of commandFolders) {
-  const commandsPath = path.join(foldersPath, folder);
-  const commandFiles = fs
-    .readdirSync(commandsPath)
-    .filter((file) => file.endsWith('.js'));
+const commandsPathRoot = path.join(__dirname, 'commands');
+if (fs.existsSync(commandsPathRoot)) {
+  const commandFolders = fs.readdirSync(commandsPathRoot);
+  for (const folder of commandFolders) {
+    const commandsPath = path.join(commandsPathRoot, folder);
+    const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
 
-  for (const file of commandFiles) {
-    const filePath = path.join(commandsPath, file);
-    const command = require(filePath);
+    for (const file of commandFiles) {
+      const filePath = path.join(commandsPath, file);
+      const command = require(filePath);
 
-    if ('data' in command && 'execute' in command) {
-      client.commands.set(command.data.name, command);
-      console.log(`[COMMAND] Loaded /${command.data.name} from ${filePath}`);
-    } else {
-      console.warn(
-        `[WARNING] The command at ${filePath} is missing "data" or "execute".`,
-      );
+      if ('data' in command && 'execute' in command) {
+        client.commands.set(command.data.name, command);
+        console.log(`[COMMAND] Loaded /${command.data.name} from ${filePath}`);
+      } else {
+        console.log(`[WARN] Command at ${filePath} is missing "data" or "execute". Skipping.`);
+      }
     }
   }
 }
 
-// Handle slash commands
-client.on(Events.InteractionCreate, async (interaction) => {
+// ===== EVENTS =====
+
+client.once('ready', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+  // Session announcements: 30 minutes before due
+  setInterval(async () => {
+    try {
+      console.log('[AUTO] Session announcement tick...');
+      await runSessionAnnouncementTick(client);
+    } catch (err) {
+      console.error('[AUTO] Session announcement error:', err);
+    }
+  }, 60 * 1000); // check every 1 minute
+
+
+// MessageCreate: automod + prefix ping
+client.on('messageCreate', async (message) => {
+  // Run automod first (bad words, spam, etc.)
+  try {
+    await handleMessageAutomod(message);
+  } catch (err) {
+    console.error('[AUTOMOD] Error while processing message:', err);
+  }
+
+  // Simple prefix command (optional)
+  if (message.author.bot) return;
+  if (message.content === '!ping') {
+    message.reply('Pong! (prefix command)');
+  }
+});
+
+// Slash commands with safe error handling
+client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const command = client.commands.get(interaction.commandName);
-  if (!command) return;
+  const command = interaction.client.commands.get(interaction.commandName);
+
+  if (!command) {
+    console.error(`No command matching ${interaction.commandName} was found.`);
+    return;
+  }
 
   try {
     await command.execute(interaction);
   } catch (error) {
     console.error('Error while executing command:', error);
+
+    // Try to send a generic error message, but DO NOT crash if this fails
     try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({
-          content: 'There was an error while executing this command.',
-          ephemeral: true,
+      if (typeof interaction.isRepliable === 'function' && !interaction.isRepliable()) {
+        return;
+      }
+
+      const payload = {
+        content: 'There was an error while executing this command.',
+        ephemeral: true, // safe for now; deprecation warning only
+      };
+
+      if (interaction.replied || interaction.deferred) {
+        interaction.followUp(payload).catch(err => {
+          console.error('Failed to send follow-up error message:', err);
         });
       } else {
-        await interaction.reply({
-          content: 'There was an error while executing this command.',
-          ephemeral: true,
+        interaction.reply(payload).catch(err => {
+          console.error('Failed to send error reply:', err);
         });
       }
     } catch (err) {
-      console.error('Failed to send error reply:', err);
+      console.error('Failed while handling command error:', err);
     }
   }
 });
 
-// When bot is ready
-client.once(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// ===== GLOBAL ERROR HANDLERS =====
 
-  // Start background session automation (every 5 minutes)
-  setInterval(async () => {
-    try {
-      console.log('[AUTO] Session automation tick...');
-      await runSessionAutomation(client);
-    } catch (err) {
-      console.error('[AUTO] Session automation error:', err);
-    }
-  }, 5 * 60 * 1000); // 5 minutes
+client.on('error', (error) => {
+  console.error('Discord client error:', error);
 });
 
-// Keep-alive HTTP server for Render
-const PORT = process.env.PORT || 3000;
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled promise rejection:', reason);
+});
 
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('All-in-one Bot is running.');
-  })
-  .listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT}`);
+// ===== LOGIN TO DISCORD =====
+
+client
+  .login(process.env.DISCORD_TOKEN)
+  .catch((err) => {
+    console.error('Failed to login to Discord:', err);
   });
-
-// Login
-client.login(process.env.DISCORD_TOKEN);
