@@ -197,7 +197,12 @@ async function cancelSessionCard({ cardId, reason }) {
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error('[TRELLO] cancelSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
+    console.error(
+      '[TRELLO] cancelSessionCard: failed to load card',
+      cardId,
+      cardRes.status,
+      cardRes.data,
+    );
     return false;
   }
 
@@ -235,7 +240,12 @@ async function cancelSessionCard({ cardId, reason }) {
   });
 
   if (!res1.ok) {
-    console.error('[TRELLO] cancelSessionCard: failed to update card', cardId, res1.status, res1.data);
+    console.error(
+      '[TRELLO] cancelSessionCard: failed to update card',
+      cardId,
+      res1.status,
+      res1.data,
+    );
     return false;
   }
 
@@ -268,7 +278,12 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error('[TRELLO] completeSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
+    console.error(
+      '[TRELLO] completeSessionCard: failed to load card',
+      cardId,
+      cardRes.status,
+      cardRes.data,
+    );
     return false;
   }
 
@@ -300,7 +315,12 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!res1.ok) {
-    console.error('[TRELLO] completeSessionCard: failed to update card', cardId, res1.status, res1.data);
+    console.error(
+      '[TRELLO] completeSessionCard: failed to update card',
+      cardId,
+      res1.status,
+      res1.data,
+    );
     return false;
   }
 
@@ -327,7 +347,12 @@ async function moveToCompletedList(cardId) {
   });
 
   if (!res.ok) {
-    console.error('[TRELLO] moveToCompletedList: failed', cardId, res.status, res.data);
+    console.error(
+      '[TRELLO] moveToCompletedList: failed',
+      cardId,
+      res.status,
+      res.data,
+    );
     return false;
   }
 
