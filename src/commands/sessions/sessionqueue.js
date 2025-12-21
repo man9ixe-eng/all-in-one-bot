@@ -2,80 +2,107 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { atLeastTier } = require('../../utils/permissions');
+const { trelloRequest } = require('../../utils/trelloClient');
 const { openQueueForCard } = require('../../utils/sessionQueueManager');
 
-function extractCardId(input) {
-  const trimmed = (input || '').trim();
+// Parse Trello card ID from a URL or raw id
+function parseTrelloCardId(raw) {
+  if (!raw) return null;
+  let s = raw.trim();
 
-  // If it's a Trello URL, grab the /c/<shortLink>
-  const cIndex = trimmed.indexOf('/c/');
-  if (cIndex !== -1) {
-    const part = trimmed.slice(cIndex + 3);
-    const seg = part.split(/[/?#]/)[0];
-    if (seg) return seg;
-  }
+  // Full URL like https://trello.com/c/ABCDE123/...
+  const m = s.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
+  if (m) return m[1];
 
-  // Otherwise, try to match a Trello id/shortlink-ish token
-  const idMatch = trimmed.match(/[0-9a-zA-Z]{8,24}/);
-  return idMatch ? idMatch[0] : null;
+  // If it's just an ID-looking string
+  if (/^[A-Za-z0-9]{8,}$/.test(s)) return s;
+
+  return null;
+}
+
+// Detect session type from card name
+function detectSessionTypeFromName(name) {
+  if (!name) return null;
+  const lower = name.toLowerCase();
+  if (lower.startsWith('[interview]')) return 'interview';
+  if (lower.startsWith('[training]')) return 'training';
+  if (lower.startsWith('[mass shift]')) return 'mass_shift';
+  return null;
 }
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open a queue post for a session Trello card.')
+    .setDescription('Open a queue post for a Trello session card.')
     .setDMPermission(false)
-    .addStringOption((option) =>
+    .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or ID')
+        .setDescription('Trello card link or id for this session.')
         .setRequired(true),
     ),
 
+  /**
+   * /sessionqueue – Tier 4+ (Management and up)
+   */
   async execute(interaction) {
-    // Keep perms same style as your other session commands
     if (!atLeastTier(interaction.member, 4)) {
-      await interaction.reply({
+      return interaction.reply({
         content: 'You must be at least **Tier 4 (Management)** to use `/sessionqueue`.',
         ephemeral: true,
       });
-      return;
     }
 
-    const raw = interaction.options.getString('card', true).trim();
-    console.log('[QUEUE] Raw card option:', raw);
+    const cardRaw = interaction.options.getString('card', true);
 
-    const cardId = extractCardId(raw);
+    const cardId = parseTrelloCardId(cardRaw);
     if (!cardId) {
-      await interaction.reply({
+      return interaction.reply({
         content:
-          'I could not parse a Trello card from that.\n' +
-          'Please paste the full card link, e.g. `https://trello.com/c/abcd1234/...`',
+          'I could not parse that as a Trello card.\n' +
+          'Please paste a valid card link (like `https://trello.com/c/...`) or a card ID.',
         ephemeral: true,
       });
-      return;
     }
 
     await interaction.deferReply({ ephemeral: true });
 
-    const ok = await openQueueForCard(interaction.client, {
-      cardId,
-      trelloUrl: raw,
+    // Fetch card from Trello
+    const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
+      fields: 'name,desc,due,shortUrl',
     });
 
+    if (!cardRes.ok || !cardRes.data) {
+      return interaction.editReply({
+        content:
+          'I could not load that Trello card from the API.\n' +
+          'Please double-check the link/ID and your Trello credentials.',
+      });
+    }
+
+    const card = cardRes.data;
+    const sessionType = detectSessionTypeFromName(card.name);
+
+    if (!sessionType) {
+      return interaction.editReply({
+        content:
+          'I could not detect the session type from that card.\n' +
+          'Make sure the card name starts with `[Interview]`, `[Training]`, or `[Mass Shift]`.',
+      });
+    }
+
+    const ok = await openQueueForCard(interaction, card, sessionType);
     if (!ok) {
-      await interaction.editReply({
+      return interaction.editReply({
         content:
           'I could not open a queue for that Trello card.\n' +
           '• Make sure the link is valid\n' +
-          '• The card has the correct session labels or `[Interview]`, `[Training]`, `[Mass Shift]` in the name\n' +
-          '• The queue/notice channels & ping roles are configured in your env (`SESSION_*` / `QUEUE_*`).',
+          '• The card name starts with [Interview], [Training] or [Mass Shift]\n',
       });
-      return;
     }
 
-    await interaction.editReply({
-      content: '✅ Queue post created for that Trello card.',
+    return interaction.editReply({
+      content: '✅ Queue opened in this channel for that session.',
     });
   },
 };
