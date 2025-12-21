@@ -17,16 +17,18 @@ const { handleMessageAutomod } = require('./utils/automod');
 const { runSessionAnnouncementTick } = require('./utils/sessionAnnouncements');
 const { handleQueueButtonInteraction } = require('./utils/sessionQueueManager');
 
-// ===== HTTP SERVER FOR RENDER KEEPALIVE =====
+// ===== HTTP SERVER FOR RENDER =====
 
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Glace bot is running.\n');
-}).listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Glace bot is running.\n');
+  })
+  .listen(PORT, () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+  });
 
 // ===== DISCORD CLIENT SETUP =====
 
@@ -39,28 +41,22 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: [
-    Partials.Message,
-    Partials.Channel,
-    Partials.Reaction,
-  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// Attach commands collection
+// Command collection
 client.commands = new Collection();
 
 // ===== LOAD COMMANDS (src/commands/**) =====
 
 const commandsPathRoot = path.join(__dirname, 'commands');
-
 if (fs.existsSync(commandsPathRoot)) {
   const commandFolders = fs.readdirSync(commandsPathRoot);
-
   for (const folder of commandFolders) {
     const commandsPath = path.join(commandsPathRoot, folder);
     const commandFiles = fs
       .readdirSync(commandsPath)
-      .filter(file => file.endsWith('.js'));
+      .filter((file) => file.endsWith('.js'));
 
     for (const file of commandFiles) {
       const filePath = path.join(commandsPath, file);
@@ -78,50 +74,44 @@ if (fs.existsSync(commandsPathRoot)) {
   }
 }
 
-// ===== READY EVENT =====
+// ===== EVENTS =====
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
-
-  // Session announcements: run every minute
-  setInterval(async () => {
-    try {
-      console.log('[AUTO] Session announcement tick...');
-      await runSessionAnnouncementTick(client);
-    } catch (err) {
-      console.error('[AUTO] Session announcement error:', err);
-    }
-  }, 60 * 1000);
 });
 
-// ===== MESSAGE CREATE: AUTOMOD + SIMPLE PREFIX =====
+// Session announcements: runs every minute
+setInterval(async () => {
+  try {
+    console.log('[AUTO] Session announcement tick...');
+    await runSessionAnnouncementTick(client);
+  } catch (err) {
+    console.error('[AUTO] Session announcement error:', err);
+  }
+}, 60 * 1000); // check every 1 minute
 
+// MessageCreate: automod + simple prefix ping
 client.on('messageCreate', async (message) => {
-  // Ignore bot messages
-  if (message.author.bot) return;
-
-  // 1) Automod (bad words, spam, etc.)
   try {
     await handleMessageAutomod(message);
   } catch (err) {
     console.error('[AUTOMOD] Error while processing message:', err);
   }
 
-  // 2) Simple prefix example
+  if (message.author.bot) return;
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
 });
 
-// ===== INTERACTION CREATE: BUTTONS + SLASH COMMANDS =====
-
-client.on(Events.InteractionCreate, async interaction => {
+// Single Interaction handler (slash commands + queue buttons)
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 1) Buttons – queue system
+    // 1) Buttons – queue system, etc.
     if (interaction.isButton()) {
       const handled = await handleQueueButtonInteraction(interaction);
-      if (handled) return; // queue handler replied, stop here
-      // if not handled, fall through to allow other button handlers in commands (if any)
+      if (handled) return;
+      // if not ours, it falls through to future button handlers if you add any
     }
 
     // 2) Slash commands
@@ -134,16 +124,20 @@ client.on(Events.InteractionCreate, async interaction => {
   } catch (error) {
     console.error('Error while executing interaction:', error);
 
-    // Best-effort safe reply
-    if (interaction.isRepliable && interaction.isRepliable()) {
-      try {
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({
+          content: 'There was an error while executing this interaction.',
+          ephemeral: true,
+        });
+      } else {
         await interaction.reply({
           content: 'There was an error while executing this interaction.',
           ephemeral: true,
         });
-      } catch {
-        // ignore double-reply issues
       }
+    } catch {
+      // ignore secondary errors
     }
   }
 });
