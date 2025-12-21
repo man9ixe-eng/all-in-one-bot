@@ -6,19 +6,12 @@ const {
   ButtonBuilder,
   ButtonStyle,
 } = require('discord.js');
-const { trelloRequest } = require('./trelloClient');
 
-// In-memory queue store: messageId -> queue state
-// This resets if the bot restarts (we'll add persistence later if needed)
-const queues = new Map();
+// ======================
+// CONFIG
+// ======================
 
-/**
- * Configuration for each session type and its roles.
- * This controls:
- *  - the roles shown as buttons
- *  - the max slots per role
- *  - labels used in attendees embed
- */
+// Per-session-type role config and max slots
 const QUEUE_ROLE_CONFIG = {
   interview: {
     displayName: 'Interview',
@@ -29,6 +22,8 @@ const QUEUE_ROLE_CONFIG = {
       interviewer: { label: 'Interviewer', maxSlots: 12 },
       spectator: { label: 'Spectator', maxSlots: 4 },
     },
+    pingEnv: 'QUEUE_INTERVIEW_PING_ROLE_ID',
+    pingFallback: '@Interview-Ping',
   },
   training: {
     displayName: 'Training',
@@ -37,9 +32,11 @@ const QUEUE_ROLE_CONFIG = {
       cohost: { label: 'Co-Host', maxSlots: 1 },
       overseer: { label: 'Overseer', maxSlots: 1 },
       trainer: { label: 'Trainer', maxSlots: 8 },
-      supervisor: { label: 'Supervisor', maxSlots: 4 }, // your extra role
+      supervisor: { label: 'Supervisor', maxSlots: 4 }, // NEW
       spectator: { label: 'Spectator', maxSlots: 4 },
     },
+    pingEnv: 'QUEUE_TRAINING_PING_ROLE_ID',
+    pingFallback: '@Training-Ping',
   },
   mass_shift: {
     displayName: 'Mass Shift',
@@ -49,139 +46,145 @@ const QUEUE_ROLE_CONFIG = {
       overseer: { label: 'Overseer', maxSlots: 1 },
       attendee: { label: 'Attendee', maxSlots: 15 },
     },
+    pingEnv: 'QUEUE_MASS_SHIFT_PING_ROLE_ID',
+    pingFallback: '@mass-shift-ping',
   },
 };
 
-/**
- * Small helper: parse host info out of the Trello card description.
- * We expect a line like: "Host: SomeUser#0000 (1234567890)"
- */
+// Channel envs (where queue posts go per type)
+const QUEUE_CHANNEL_ENVS = {
+  interview: 'QUEUE_INTERVIEW_CHANNEL_ID',
+  training: 'QUEUE_TRAINING_CHANNEL_ID',
+  mass_shift: 'QUEUE_MASS_SHIFT_CHANNEL_ID',
+};
+
+// ======================
+// IN-MEMORY STORE
+// ======================
+
+// messageId -> queue state
+const queues = new Map();
+
+// ======================
+// HELPERS
+// ======================
+
 function extractHostFromDesc(desc) {
-  if (!desc) return { hostLine: 'Unknown', hostId: null };
+  if (!desc) return { hostDisplay: 'Unknown', hostId: null };
 
   const lines = desc.split('\n');
   const hostLine = lines.find(l => l.toLowerCase().startsWith('host:'));
-  if (!hostLine) return { hostLine: 'Unknown', hostId: null };
+  if (!hostLine) return { hostDisplay: 'Unknown', hostId: null };
 
-  // Try to grab the ID in parentheses at the end
   const idMatch = hostLine.match(/\((\d{10,})\)\s*$/);
   const hostId = idMatch ? idMatch[1] : null;
 
-  return { hostLine: hostLine.replace(/^Host:\s*/i, '').trim(), hostId };
+  if (hostId) {
+    return { hostDisplay: `<@${hostId}>`, hostId };
+  }
+
+  const cleaned = hostLine.replace(/^Host:\s*/i, '').trim() || 'Unknown';
+  return { hostDisplay: cleaned, hostId: null };
 }
 
 /**
- * Detect session type from Trello card name or labels.
- * For now we only use the name, since you already format it as:
- *   [Interview] ...
- *   [Training] ...
- *   [Mass Shift] ...
+ * Build the queue embed with your original style per session type.
  */
-function detectSessionType(card) {
-  if (!card || !card.name) return null;
-  const name = card.name.toLowerCase();
-
-  if (name.startsWith('[interview]')) return 'interview';
-  if (name.startsWith('[training]')) return 'training';
-  if (name.startsWith('[mass shift]')) return 'mass_shift';
-
-  return null;
-}
-
-/**
- * Build the queue embed per session type.
- */
-function buildQueueEmbed({ card, sessionType, channel, guild }) {
+function buildQueueEmbed({ card, sessionType }) {
   const cfg = QUEUE_ROLE_CONFIG[sessionType];
   if (!cfg) return null;
 
-  const { hostLine, hostId } = extractHostFromDesc(card.desc || '');
-  const hostDisplay = hostId ? `<@${hostId}>` : hostLine || 'Unknown';
+  const { hostDisplay } = extractHostFromDesc(card.desc || '');
   const trelloUrl = card.shortUrl || `https://trello.com/c/${card.id}`;
-  const dueUnix = card.due ? Math.floor(new Date(card.due).getTime() / 1000) : null;
+  const due = card.due ? new Date(card.due) : null;
+  const dueUnix = due ? Math.floor(due.getTime() / 1000) : null;
 
-  // Header / title
-  const title = `${cfg.emoji} ${cfg.displayName.toUpperCase()} | ${hostDisplay}`;
+  const lines = [];
 
-  // Role explanation block per type
-  let rolesBlockLines = [];
+  // Header box (your original vibe)
+  lines.push('╔══════════════════════════════════════╗');
 
   if (sessionType === 'interview') {
-    rolesBlockLines = [
-      '💠 **ROLES**',
-      '────────────────────────────────────────',
-      'ℹ️ **Co-Host:** Corporate Intern+',
-      'ℹ️ **Overseer:** Executive Manager+',
-      'ℹ️ **Interviewer (12):** Leadership Intern+',
-      'ℹ️ **Spectator (4):** Leadership Intern+',
-    ];
+    lines.push('                         🟡 INTERVIEW | HOST | TIME 🟡');
   } else if (sessionType === 'training') {
-    rolesBlockLines = [
-      '💠 **ROLES**',
-      '────────────────────────────────────────',
-      'ℹ️ **Co-Host:** Corporate Intern+',
-      'ℹ️ **Overseer:** Executive Manager+',
-      'ℹ️ **Trainer (8):** Leadership Intern+',
-      'ℹ️ **Supervisor (4):** Supervisor+',
-      'ℹ️ **Spectator (4):** Leadership Intern+',
-    ];
+    lines.push('                             🔴  TRAINING | HOST | TIME  🔴');
   } else if (sessionType === 'mass_shift') {
-    rolesBlockLines = [
-      '💠 **ROLES**',
-      '────────────────────────────────────────',
-      'ℹ️ **Co-Host:** Corporate Intern+',
-      'ℹ️ **Overseer:** Executive Manager+',
-      'ℹ️ **Attendee (15):** Leadership Intern+',
-    ];
+    lines.push('                         🟣  MASS SHIFT | HOST | TIME  🟣');
+  } else {
+    lines.push(`                           ${cfg.emoji} ${cfg.displayName.toUpperCase()} ${cfg.emoji}`);
   }
 
-  const lines = [
-    '╔══════════════════════════════════════╗',
-    `        ${cfg.emoji} ${cfg.displayName.toUpperCase()} | ${hostDisplay} ${cfg.emoji}`,
-    '╚══════════════════════════════════════╝',
-    '',
-    `📌 **Host:** ${hostDisplay}`,
-  ];
+  lines.push('╚══════════════════════════════════════╝');
+  lines.push('');
 
+  // Host / time
+  lines.push(`📌  **Host:** ${hostDisplay}`);
   if (dueUnix) {
-    lines.push(
-      `📌 **Starts:** <t:${dueUnix}:R>`,
-      `📌 **Time:** <t:${dueUnix}:t>`,
-    );
+    lines.push(`📌 **Starts:** <t:${dueUnix}:R>`);
+    lines.push(`📌 **Time:** <t:${dueUnix}:t>`);
+  }
+  lines.push('');
+
+  // Roles block per type
+  lines.push('💠 **ROLES** 💠');
+  lines.push('----------------------------------------------------------------');
+
+  if (sessionType === 'interview') {
+    lines.push('ℹ️  **Co-Host:** Corporate Intern+');
+    lines.push('ℹ️  **Overseer:** Executive Manager+');
+    lines.push('ℹ️  **Interviewer (12):** Leadership Intern+');
+    lines.push('ℹ️  **Spectator (4):** Leadership Intern+');
+  } else if (sessionType === 'training') {
+    lines.push('ℹ️  **Co-Host:** Corporate Intern+');
+    lines.push('ℹ️  **Overseer:** Executive Manager+');
+    lines.push('ℹ️  **Trainer (8):** Leadership Intern+');
+    lines.push('ℹ️  **Supervisor (4):** Supervisor+');
+    lines.push('ℹ️  **Spectator (4):** Leadership Intern+');
+  } else if (sessionType === 'mass_shift') {
+    lines.push('ℹ️  **Co-Host:** Corporate Intern+');
+    lines.push('ℹ️  **Overseer:** Executive Manager+');
+    lines.push('ℹ️  **Attendee (15):** Leadership Intern+');
   }
 
-  lines.push('', ...rolesBlockLines);
+  lines.push('');
+  lines.push('❓  **HOW TO JOIN THE QUEUE** ❓');
+  lines.push('----------------------------------------------------------------');
+  lines.push('- Check the role list above — if your rank is allowed, press the role button you want.');
+  lines.push('- You’ll get a private message that says you were added to that role\'s queue.');
+  lines.push('- Do NOT join the game until the attendees post is made in the attendees channel.');
+  lines.push('');
 
-  // Generic instructions
-  lines.push(
-    '',
-    '❓ **HOW TO JOIN THE QUEUE**',
-    '────────────────────────────────────────',
-    '- If your rank is allowed, press the matching button below.',
-    '- You\'ll get a confirmation reply when you are added.',
-    '- Don\'t join the game until the attendees list is posted.',
-    '',
-    '❓ **HOW TO LEAVE THE QUEUE**',
-    '────────────────────────────────────────',
-    '- Press **Leave Queue** to remove yourself.',
-    '- After the attendees list is posted, changes must be handled by the host/corporate manually.',
-    '',
-    '╭─────── 💠 LINKS 💠 ───────────╮',
-    `〰️ **Trello Card:** ${trelloUrl}`,
-    '╰─────────────────────────────╯',
-  );
+  lines.push('❓ **HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL** ❓');
+  lines.push('----------------------------------------------------------------');
+  lines.push('- Click the **Leave Queue** button once you have joined a role.');
+  lines.push('- After the attendees post is made, changes must be handled by the host/corporate manually.');
+  lines.push('');
+
+  lines.push('----------------------------------------------------------------');
+  lines.push('╭─────── 💠 LINKS 💠 ───────────╮');
+  lines.push(`• **Trello Card:** ${trelloUrl}`);
+  lines.push('╰─────────────────────────────╯');
+  lines.push('');
+
+  // Ping role (if configured)
+  const pingEnvName = cfg.pingEnv;
+  const pingRoleId = process.env[pingEnvName];
+  if (pingRoleId) {
+    lines.push(`<@&${pingRoleId}>`);
+  } else {
+    // Fallback to literal text if env not set
+    lines.push(cfg.pingFallback);
+  }
 
   const embed = new EmbedBuilder()
-    .setColor(0x87CEFA) // light icy blue
-    .setTitle(title)
-    .setDescription(lines.join('\n'));
+    .setColor(0x87cefa) // icy blue
+    .setDescription(lines.join('\n')); // NOTE: no title => no double header
 
   return embed;
 }
 
 /**
- * Build button rows for the queue.
- * We don't encode the messageId in the customId; instead we rely on interaction.message.id.
+ * Build button rows: one button per role, plus a Leave Queue button.
  */
 function buildQueueButtons(sessionType) {
   const cfg = QUEUE_ROLE_CONFIG[sessionType];
@@ -189,17 +192,18 @@ function buildQueueButtons(sessionType) {
 
   const row1 = new ActionRowBuilder();
   const row2 = new ActionRowBuilder();
+  const rowLeave = new ActionRowBuilder();
 
-  const roleOrder = Object.keys(cfg.roles);
+  const roleKeys = Object.keys(cfg.roles);
 
-  for (const roleKey of roleOrder) {
+  for (const roleKey of roleKeys) {
     const roleCfg = cfg.roles[roleKey];
+
     const btn = new ButtonBuilder()
       .setCustomId(`queue:join:${roleKey}`)
       .setLabel(roleCfg.label)
       .setStyle(ButtonStyle.Primary);
 
-    // First 4 buttons go on row1, rest on row2
     if (row1.components.length < 4) {
       row1.addComponents(btn);
     } else {
@@ -207,13 +211,12 @@ function buildQueueButtons(sessionType) {
     }
   }
 
-  // Leave button on its own row
   const leaveBtn = new ButtonBuilder()
     .setCustomId('queue:leave')
     .setLabel('Leave Queue')
     .setStyle(ButtonStyle.Secondary);
 
-  const rowLeave = new ActionRowBuilder().addComponents(leaveBtn);
+  rowLeave.addComponents(leaveBtn);
 
   const rows = [];
   if (row1.components.length > 0) rows.push(row1);
@@ -224,11 +227,34 @@ function buildQueueButtons(sessionType) {
 }
 
 /**
- * Called by /sessionqueue to actually open the queue post.
- *
- * @param {ChatInputCommandInteraction} interaction
- * @param {object} card Trello card data (from trelloRequest)
- * @param {string} sessionType 'interview' | 'training' | 'mass_shift'
+ * Resolve which channel the queue post should go in for a given sessionType.
+ * Uses QUEUE_*_CHANNEL_ID env vars, falls back to the command channel.
+ */
+async function resolveQueueChannel(interaction, sessionType) {
+  const envName = QUEUE_CHANNEL_ENVS[sessionType];
+  const channelId = envName ? process.env[envName] : null;
+
+  if (!channelId) {
+    console.warn('[QUEUE] Missing channel config for session type:', sessionType, 'env:', envName);
+    // Fallback: just use the channel where the command was run
+    return interaction.channel;
+  }
+
+  try {
+    const ch = await interaction.client.channels.fetch(channelId);
+    if (!ch) {
+      console.warn('[QUEUE] Could not fetch queue channel with id', channelId, 'for type', sessionType);
+      return interaction.channel;
+    }
+    return ch;
+  } catch (err) {
+    console.error('[QUEUE] Error fetching queue channel', channelId, err);
+    return interaction.channel;
+  }
+}
+
+/**
+ * Called by /sessionqueue to open the queue for a Trello card.
  */
 async function openQueueForCard(interaction, card, sessionType) {
   const cfg = QUEUE_ROLE_CONFIG[sessionType];
@@ -237,19 +263,13 @@ async function openQueueForCard(interaction, card, sessionType) {
     return false;
   }
 
-  const channel = interaction.channel;
+  const channel = await resolveQueueChannel(interaction, sessionType);
   if (!channel) {
-    console.warn('[QUEUE] No channel found on interaction');
+    console.warn('[QUEUE] No channel resolved for queue');
     return false;
   }
 
-  const embed = buildQueueEmbed({
-    card,
-    sessionType,
-    channel,
-    guild: interaction.guild,
-  });
-
+  const embed = buildQueueEmbed({ card, sessionType });
   if (!embed) {
     console.warn('[QUEUE] Failed to build embed for sessionType', sessionType);
     return false;
@@ -273,16 +293,26 @@ async function openQueueForCard(interaction, card, sessionType) {
     roles: {},
   };
 
-  const roleKeys = Object.keys(cfg.roles);
-  for (const r of roleKeys) {
-    queueState.roles[r] = []; // array of userIds in join order
+  // Setup per-role queues
+  for (const roleKey of Object.keys(cfg.roles)) {
+    queueState.roles[roleKey] = [];
   }
 
   queues.set(message.id, queueState);
 
-  console.log('[QUEUE] Opened queue for card', card.id, 'on message', message.id);
-
+  console.log('[QUEUE] Opened queue for card', card.id, 'on message', message.id, 'in channel', channel.id);
   return true;
+}
+
+// ======================
+// BUTTON HANDLING
+// ======================
+
+/**
+ * Find queue by message id.
+ */
+function getQueueByMessageId(messageId) {
+  return queues.get(messageId) || null;
 }
 
 /**
@@ -298,16 +328,14 @@ function getQueueByCardId(cardId) {
 }
 
 /**
- * Handle button clicks for the queue system.
- * Called from index.js when interaction.isButton() is true.
- *
+ * Handle queue join/leave buttons.
  * Returns true if this interaction was handled by the queue system.
  */
 async function handleQueueButtonInteraction(interaction) {
   const customId = interaction.customId || '';
   if (!customId.startsWith('queue:')) return false;
 
-  const parts = customId.split(':'); // queue:join:roleKey  OR queue:leave
+  const parts = customId.split(':'); // queue:join:roleKey or queue:leave
   const action = parts[1];
   const roleKey = parts[2] || null;
 
@@ -320,7 +348,7 @@ async function handleQueueButtonInteraction(interaction) {
     return true;
   }
 
-  const queue = queues.get(messageId);
+  const queue = getQueueByMessageId(messageId);
   if (!queue) {
     await interaction.reply({
       content: 'This queue is no longer active.',
@@ -351,7 +379,7 @@ async function handleQueueButtonInteraction(interaction) {
 
     const roleCfg = cfg.roles[roleKey];
 
-    // Ensure user is only in one role at a time: remove from all first
+    // Remove from all roles first so they only hold one seat
     let wasInAny = false;
     for (const rKey of Object.keys(queue.roles)) {
       const arr = queue.roles[rKey];
@@ -415,13 +443,17 @@ async function handleQueueButtonInteraction(interaction) {
     return true;
   }
 
-  // Unknown queue:* button
+  // Unknown queue:* action
   return false;
 }
 
+// ======================
+// ATTENDEES SUPPORT
+// ======================
+
 /**
  * Build attendees data (per role) from the stored queue for a given Trello card.
- * For v1 we just return them in join order up to maxSlots.
+ * Used by /sessionattendees – returns users in join order up to maxSlots.
  */
 function buildAttendeesFromQueue(cardId) {
   const match = getQueueByCardId(cardId);
@@ -431,14 +463,14 @@ function buildAttendeesFromQueue(cardId) {
   const cfg = QUEUE_ROLE_CONFIG[state.sessionType];
   if (!cfg) return null;
 
-  const result = {};
+  const rolesOut = {};
 
   for (const [roleKey, userIds] of Object.entries(state.roles)) {
     const roleCfg = cfg.roles[roleKey];
     if (!roleCfg) continue;
 
     const selected = userIds.slice(0, roleCfg.maxSlots);
-    result[roleKey] = {
+    rolesOut[roleKey] = {
       label: roleCfg.label,
       users: selected,
     };
@@ -447,7 +479,7 @@ function buildAttendeesFromQueue(cardId) {
   return {
     sessionType: state.sessionType,
     trelloCardId: state.trelloCardId,
-    roles: result,
+    roles: rolesOut,
   };
 }
 
