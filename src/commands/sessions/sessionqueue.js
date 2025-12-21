@@ -7,62 +7,62 @@ const { openQueueForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Manually open a test queue for a Trello session card (temporary helper).')
+    .setDescription('Open a Glace session queue post for a Trello session card.')
     .setDMPermission(false)
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or ID.')
+        .setDescription('Trello card link or ID for the session.')
         .setRequired(true),
     ),
 
-  /**
-   * /sessionqueue – TEMP TEST COMMAND
-   * Tier 4+ only
-   */
   async execute(interaction) {
-    // Permission check
-    if (!atLeastTier(interaction.member, 4)) {
+    // Permission check: Tier 6+ (Corporate Intern+)
+    if (!atLeastTier(interaction.member, 6)) {
       return interaction.reply({
-        content: 'You must be at least **Tier 4 (Management)** to use `/sessionqueue`.',
+        content: 'You must be at least **Tier 6 (Corporate Intern+)** to use `/sessionqueue`.',
         ephemeral: true,
       });
     }
 
-    // DO NOT pass "true" as the second parameter – that’s what was throwing
-    const cardRefRaw = interaction.options.getString('card'); // safe
-    const cardRef = (cardRefRaw || '').trim();
-
-    if (!cardRef) {
-      return interaction.reply({
-        content:
-          'You need to provide a Trello card link or ID.\n' +
-          'Example: `/sessionqueue card: https://trello.com/c/XXXXXXX`',
-        ephemeral: true,
-      });
-    }
-
-    await interaction.deferReply({ ephemeral: true });
+    const cardInput = interaction.options.getString('card', true);
 
     try {
-      // Placeholder stub. Just logs for now.
-      await openQueueForCard(interaction.client, cardRef, {
-        invokedBy: interaction.user.id,
+      // Try to open the queue for this Trello card
+      const ok = await openQueueForCard(interaction.client, { cardInput });
+
+      if (!ok) {
+        return interaction.reply({
+          content:
+            'I couldn’t open a queue for that Trello card.\n' +
+            'Make sure:\n' +
+            '• The card is a valid **Interview / Training / Mass Shift** session card\n' +
+            '• The list + label IDs in `.env`/Render are correct\n' +
+            '• `SESSION_CONFIG` has a queue channel set for that session type.',
+          ephemeral: true,
+        });
+      }
+
+      // Success – queue embed was posted in the configured channel
+      return interaction.reply({
+        content:
+          '✅ Queue post created for that session.\n' +
+          'Check the appropriate **session queue channel** for the buttons.',
+        ephemeral: true,
       });
-
-      await interaction.editReply(
-        '✅ `/sessionqueue` ran successfully (queue system is still in placeholder mode).',
-      );
     } catch (err) {
-      console.error('[SESSIONQUEUE] Error in /sessionqueue:', err);
+      console.error('[SESSIONQUEUE] Unexpected error while opening queue:', err);
 
+      // Try to tell the user something went wrong
       try {
-        await interaction.editReply({
-          content: 'There was an error while running `/sessionqueue`.',
+        await interaction.reply({
+          content: 'There was an error while opening the queue for that card.',
+          ephemeral: true,
         });
       } catch {
-        // ignore
+        // ignore (avoid double-reply crash)
       }
     }
   },
 };
+
