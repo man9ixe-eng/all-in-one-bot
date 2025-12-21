@@ -32,7 +32,7 @@ const QUEUE_ROLE_CONFIG = {
       cohost: { label: 'Co-Host', maxSlots: 1 },
       overseer: { label: 'Overseer', maxSlots: 1 },
       trainer: { label: 'Trainer', maxSlots: 8 },
-      supervisor: { label: 'Supervisor', maxSlots: 4 }, // NEW
+      supervisor: { label: 'Supervisor', maxSlots: 4 }, // Supervisor (4)
       spectator: { label: 'Spectator', maxSlots: 4 },
     },
     pingEnv: 'QUEUE_TRAINING_PING_ROLE_ID',
@@ -89,6 +89,7 @@ function extractHostFromDesc(desc) {
 
 /**
  * Build the queue embed with your original style per session type.
+ * Header is centered using EM spaces and shows real host + time.
  */
 function buildQueueEmbed({ card, sessionType }) {
   const cfg = QUEUE_ROLE_CONFIG[sessionType];
@@ -98,30 +99,36 @@ function buildQueueEmbed({ card, sessionType }) {
   const trelloUrl = card.shortUrl || `https://trello.com/c/${card.id}`;
   const due = card.due ? new Date(card.due) : null;
   const dueUnix = due ? Math.floor(due.getTime() / 1000) : null;
+  const timeExact = dueUnix ? `<t:${dueUnix}:t>` : 'Time TBA';
+  const timeRelative = dueUnix ? `<t:${dueUnix}:R>` : 'TBA';
+
+  // Use EM spaces (U+2003) so Discord doesn’t collapse them
+  const pad = '\u2003'.repeat(6);
+
+  let headerText;
+  if (sessionType === 'interview') {
+    headerText = `🟡 INTERVIEW | ${hostDisplay} | ${timeExact} 🟡`;
+  } else if (sessionType === 'training') {
+    headerText = `🔴 TRAINING | ${hostDisplay} | ${timeExact} 🔴`;
+  } else if (sessionType === 'mass_shift') {
+    headerText = `🟣 MASS SHIFT | ${hostDisplay} | ${timeExact} 🟣`;
+  } else {
+    headerText = `${cfg.emoji} ${cfg.displayName.toUpperCase()} ${cfg.emoji}`;
+  }
 
   const lines = [];
 
-  // Header box (your original vibe)
+  // Header box
   lines.push('╔══════════════════════════════════════╗');
-
-  if (sessionType === 'interview') {
-    lines.push('                         🟡 INTERVIEW | HOST | TIME 🟡');
-  } else if (sessionType === 'training') {
-    lines.push('                             🔴  TRAINING | HOST | TIME  🔴');
-  } else if (sessionType === 'mass_shift') {
-    lines.push('                         🟣  MASS SHIFT | HOST | TIME  🟣');
-  } else {
-    lines.push(`                           ${cfg.emoji} ${cfg.displayName.toUpperCase()} ${cfg.emoji}`);
-  }
-
+  lines.push(`${pad}${headerText}`);
   lines.push('╚══════════════════════════════════════╝');
   lines.push('');
 
-  // Host / time
+  // Host / time (body lines)
   lines.push(`📌  **Host:** ${hostDisplay}`);
   if (dueUnix) {
-    lines.push(`📌 **Starts:** <t:${dueUnix}:R>`);
-    lines.push(`📌 **Time:** <t:${dueUnix}:t>`);
+    lines.push(`📌 **Starts:** ${timeRelative}`);
+    lines.push(`📌 **Time:** ${timeExact}`);
   }
   lines.push('');
 
@@ -150,7 +157,7 @@ function buildQueueEmbed({ card, sessionType }) {
   lines.push('❓  **HOW TO JOIN THE QUEUE** ❓');
   lines.push('----------------------------------------------------------------');
   lines.push('- Check the role list above — if your rank is allowed, press the role button you want.');
-  lines.push('- You’ll get a private message that says you were added to that role\'s queue.');
+  lines.push("- You’ll get a private message that says you were added to that role's queue.");
   lines.push('- Do NOT join the game until the attendees post is made in the attendees channel.');
   lines.push('');
 
@@ -164,21 +171,10 @@ function buildQueueEmbed({ card, sessionType }) {
   lines.push('╭─────── 💠 LINKS 💠 ───────────╮');
   lines.push(`• **Trello Card:** ${trelloUrl}`);
   lines.push('╰─────────────────────────────╯');
-  lines.push('');
-
-  // Ping role (if configured)
-  const pingEnvName = cfg.pingEnv;
-  const pingRoleId = process.env[pingEnvName];
-  if (pingRoleId) {
-    lines.push(`<@&${pingRoleId}>`);
-  } else {
-    // Fallback to literal text if env not set
-    lines.push(cfg.pingFallback);
-  }
 
   const embed = new EmbedBuilder()
     .setColor(0x87cefa) // icy blue
-    .setDescription(lines.join('\n')); // NOTE: no title => no double header
+    .setDescription(lines.join('\n')); // only description => no double title
 
   return embed;
 }
@@ -277,7 +273,13 @@ async function openQueueForCard(interaction, card, sessionType) {
 
   const components = buildQueueButtons(sessionType);
 
+  // Ping role OUTSIDE the embed so it actually pings
+  const pingEnvName = cfg.pingEnv;
+  const pingRoleId = process.env[pingEnvName];
+  const content = pingRoleId ? `<@&${pingRoleId}>` : cfg.pingFallback;
+
   const message = await channel.send({
+    content,
     embeds: [embed],
     components,
   });
