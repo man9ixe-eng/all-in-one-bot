@@ -17,23 +17,19 @@ const { handleMessageAutomod } = require('./utils/automod');
 const { runSessionAnnouncementTick } = require('./utils/sessionAnnouncements');
 const { handleQueueButtonInteraction } = require('./utils/sessionQueueManager');
 
-// ==========================
-// HTTP SERVER FOR RENDER
-// ==========================
+// ===== HTTP SERVER FOR RENDER KEEPALIVE =====
+
 const PORT = process.env.PORT || 3000;
 
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Glace bot is running.\n');
-  })
-  .listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT}`);
-  });
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Glace bot is running.\n');
+}).listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
 
-// ==========================
-// DISCORD CLIENT SETUP
-// ==========================
+// ===== DISCORD CLIENT SETUP =====
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -50,11 +46,11 @@ const client = new Client({
   ],
 });
 
+// Attach commands collection
 client.commands = new Collection();
 
-// ==========================
-// LOAD COMMANDS (src/commands/**)
-// ==========================
+// ===== LOAD COMMANDS (src/commands/**) =====
+
 const commandsPathRoot = path.join(__dirname, 'commands');
 
 if (fs.existsSync(commandsPathRoot)) {
@@ -82,54 +78,50 @@ if (fs.existsSync(commandsPathRoot)) {
   }
 }
 
-// ==========================
-// READY EVENT
-// ==========================
-client.once(Events.ClientReady, c => {
-  console.log(`Logged in as ${c.user.tag}`);
+// ===== READY EVENT =====
+
+client.once('ready', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  // Session announcements: run every minute
+  setInterval(async () => {
+    try {
+      console.log('[AUTO] Session announcement tick...');
+      await runSessionAnnouncementTick(client);
+    } catch (err) {
+      console.error('[AUTO] Session announcement error:', err);
+    }
+  }, 60 * 1000);
 });
 
-// ==========================
-// SESSION ANNOUNCEMENT TICK
-// (30-min checks, runs every minute)
-// ==========================
-setInterval(async () => {
-  try {
-    console.log('[AUTO] Session announcement tick...');
-    await runSessionAnnouncementTick(client);
-  } catch (err) {
-    console.error('[AUTO] Session announcement error:', err);
-  }
-}, 60 * 1000); // every 1 minute
+// ===== MESSAGE CREATE: AUTOMOD + SIMPLE PREFIX =====
 
-// ==========================
-// MESSAGE CREATE – AUTOMOD + OPTIONAL PREFIX
-// ==========================
-client.on(Events.MessageCreate, async message => {
-  // Run automod (bad words, spam, etc.)
+client.on('messageCreate', async (message) => {
+  // Ignore bot messages
+  if (message.author.bot) return;
+
+  // 1) Automod (bad words, spam, etc.)
   try {
     await handleMessageAutomod(message);
   } catch (err) {
     console.error('[AUTOMOD] Error while processing message:', err);
   }
 
-  // Simple legacy prefix command
-  if (message.author.bot) return;
+  // 2) Simple prefix example
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
 });
 
-// ==========================
-// INTERACTIONS (BUTTONS + SLASH)
-// ==========================
+// ===== INTERACTION CREATE: BUTTONS + SLASH COMMANDS =====
+
 client.on(Events.InteractionCreate, async interaction => {
   try {
-    // 1) Buttons – queue system, etc.
+    // 1) Buttons – queue system
     if (interaction.isButton()) {
       const handled = await handleQueueButtonInteraction(interaction);
-      if (handled) return; // our queue handler took care of it
-      // if not ours, fall through to slash commands below
+      if (handled) return; // queue handler replied, stop here
+      // if not handled, fall through to allow other button handlers in commands (if any)
     }
 
     // 2) Slash commands
@@ -142,39 +134,34 @@ client.on(Events.InteractionCreate, async interaction => {
   } catch (error) {
     console.error('Error while executing interaction:', error);
 
-    try {
-      const payload = {
-        content: 'There was an error while executing this interaction.',
-        ephemeral: true,
-      };
-
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp(payload);
-      } else {
-        await interaction.reply(payload);
+    // Best-effort safe reply
+    if (interaction.isRepliable && interaction.isRepliable()) {
+      try {
+        await interaction.reply({
+          content: 'There was an error while executing this interaction.',
+          ephemeral: true,
+        });
+      } catch {
+        // ignore double-reply issues
       }
-    } catch {
-      // ignore double-reply issues
     }
   }
 });
 
-// ==========================
-// GLOBAL ERROR HANDLERS
-// ==========================
-client.on('error', error => {
+// ===== GLOBAL ERROR HANDLERS =====
+
+client.on('error', (error) => {
   console.error('Discord client error:', error);
 });
 
-process.on('unhandledRejection', (reason, _promise) => {
+process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled promise rejection:', reason);
 });
 
-// ==========================
-// LOGIN
-// ==========================
+// ===== LOGIN TO DISCORD =====
+
 client
   .login(process.env.DISCORD_TOKEN)
-  .catch(err => {
+  .catch((err) => {
     console.error('Failed to login to Discord:', err);
   });
