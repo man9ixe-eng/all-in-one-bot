@@ -7,6 +7,7 @@ const STORE_PATH = path.join(DATA_DIR, 'sessionQueues.json');
 
 let store = {};
 
+// Load from disk on startup
 function loadStore() {
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
@@ -23,96 +24,124 @@ function saveStore() {
     }
     fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
   } catch (err) {
-    console.error('[QUEUE] Failed to save sessionQueues store:', err);
+    console.error('[QUEUE] Failed to save queue store:', err);
   }
 }
 
 loadStore();
 
-function getQueue(cardId) {
+/**
+ * Create / reset queue state for a Trello card.
+ * roleKeys = array like ['cohost','overseer','interviewer',...]
+ */
+function initQueueState(
+  cardId,
+  sessionType,
+  queueChannelId,
+  queueMessageId,
+  attendeesChannelId,
+  attendeesMessageId,
+  roleKeys,
+  meta = {},
+) {
+  const queues = {};
+  for (const key of roleKeys) {
+    queues[key] = [];
+  }
+
+  store[cardId] = {
+    sessionType,
+    queueChannelId,
+    queueMessageId,
+    attendeesChannelId,
+    attendeesMessageId,
+    createdAt: Date.now(),
+    closed: false,
+    meta,
+    queues,
+  };
+
+  saveStore();
+}
+
+function getQueueState(cardId) {
   return store[cardId] || null;
 }
 
-function setQueue(cardId, data) {
-  store[cardId] = {
-    ...(store[cardId] || {}),
-    ...data,
-    cardId,
-  };
-  saveStore();
-}
+/**
+ * Add a user to a specific role queue.
+ * - Removes them from any other role in this card
+ * - Respects maxSlots
+ */
+function addToQueue(cardId, roleKey, userId, maxSlots) {
+  const state = store[cardId];
+  if (!state) return { ok: false, code: 'noQueue' };
+  if (state.closed) return { ok: false, code: 'closed' };
 
-function deleteQueue(cardId) {
-  if (store[cardId]) {
-    delete store[cardId];
-    saveStore();
+  if (!state.queues[roleKey]) {
+    state.queues[roleKey] = [];
   }
-}
 
-function ensureQueue(cardId) {
-  if (!store[cardId]) {
-    store[cardId] = {
-      cardId,
-      sessionType: null,
-      queueChannelId: null,
-      queueMessageId: null,
-      dueUnix: null,
-      locked: false,
-      createdAt: Date.now(),
-      joins: [],
-    };
-  } else if (!Array.isArray(store[cardId].joins)) {
-    store[cardId].joins = [];
+  // Remove from any other role first so user is only in one queue
+  for (const [k, arr] of Object.entries(state.queues)) {
+    const idx = arr.indexOf(userId);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+    }
   }
-  return store[cardId];
+
+  const arr = state.queues[roleKey];
+
+  if (arr.includes(userId)) {
+    return { ok: false, code: 'already' };
+  }
+
+  if (typeof maxSlots === 'number' && maxSlots > 0 && arr.length >= maxSlots) {
+    return { ok: false, code: 'full' };
+  }
+
+  arr.push(userId);
+  saveStore();
+  return { ok: true };
 }
 
-function addJoin(cardId, userId, role) {
-  const q = ensureQueue(cardId);
-  const now = Date.now();
+/**
+ * Remove user from all role queues for that card.
+ */
+function removeFromQueue(cardId, userId) {
+  const state = store[cardId];
+  if (!state) return { ok: false, code: 'noQueue' };
 
-  q.joins = (q.joins || []).filter(j => j.userId !== userId);
-  q.joins.push({ userId, role, joinedAt: now });
+  let removedRole = null;
+
+  for (const [k, arr] of Object.entries(state.queues)) {
+    const idx = arr.indexOf(userId);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+      removedRole = k;
+    }
+  }
+
+  if (!removedRole) {
+    return { ok: false, code: 'notFound' };
+  }
 
   saveStore();
-  return q;
+  return { ok: true, roleKey: removedRole };
 }
 
-function removeJoin(cardId, userId) {
-  const q = store[cardId];
-  if (!q || !Array.isArray(q.joins)) return;
-
-  const before = q.joins.length;
-  q.joins = q.joins.filter(j => j.userId !== userId);
-  if (q.joins.length !== before) {
-    saveStore();
-  }
-}
-
-function lockQueue(cardId) {
-  const q = store[cardId];
-  if (!q) return;
-  q.locked = true;
+function setClosed(cardId, closed) {
+  const state = store[cardId];
+  if (!state) return { ok: false, code: 'noQueue' };
+  state.closed = !!closed;
   saveStore();
-}
-
-function isLocked(cardId) {
-  const q = store[cardId];
-  return !!(q && q.locked);
-}
-
-function listJoins(cardId) {
-  const q = store[cardId];
-  return q && Array.isArray(q.joins) ? q.joins.slice() : [];
+  return { ok: true };
 }
 
 module.exports = {
-  getQueue,
-  setQueue,
-  deleteQueue,
-  addJoin,
-  removeJoin,
-  lockQueue,
-  isLocked,
-  listJoins,
+  initQueueState,
+  getQueueState,
+  addToQueue,
+  removeFromQueue,
+  setClosed,
 };
