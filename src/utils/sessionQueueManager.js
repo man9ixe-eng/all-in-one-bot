@@ -361,9 +361,48 @@ function buildQueueButtons(sessionType, cardId) {
   return [row1, leaveRow];
 }
 
-// ===== ATTENDEES MESSAGE BUILDERS (PLAIN TEXT) =====
+// ===== ATTENDEES MESSAGE BUILDERS (PLAIN TEXT + HYRA COUNTS) =====
 
-function buildAttendeesMessage(sessionType, hostTag, picksByRole, pingRoleId) {
+function formatUserWithCount(user, hyraCounts, fallbackLabel) {
+  if (!user || !user.userId) {
+    return fallbackLabel || 'N/A';
+  }
+  const count = hyraCounts[user.userId] ?? 0;
+  const sessionsText = `${count} session${count === 1 ? '' : 's'}`;
+  return `<@${user.userId}> (${sessionsText})`;
+}
+
+function formatHostLine(hostTag, hostId, hyraCounts) {
+  if (!hostId) {
+    // No ID, just show the tag
+    return hostTag || 'N/A';
+  }
+  const count = hyraCounts[hostId] ?? 0;
+  const sessionsText = `${count} session${count === 1 ? '' : 's'}`;
+  return `<@${hostId}> (${sessionsText})`;
+}
+
+function formatSingle(arr, hyraCounts) {
+  if (!arr || !arr.length) return 'N/A';
+  return formatUserWithCount(arr[0], hyraCounts);
+}
+
+function formatNumberedList(arr, maxCount, hyraCounts) {
+  const lines = [];
+  const picks = arr || [];
+  for (let i = 0; i < maxCount; i++) {
+    const spot = i + 1;
+    const u = picks[i];
+    if (u) {
+      lines.push(`${spot}. ${formatUserWithCount(u, hyraCounts)}`);
+    } else {
+      lines.push(`${spot}.`);
+    }
+  }
+  return lines;
+}
+
+function buildAttendeesMessage(sessionType, hostTag, hostId, picksByRole, pingRoleId, hyraCounts) {
   let lines = [];
 
   if (sessionType === 'interview') {
@@ -372,39 +411,39 @@ function buildAttendeesMessage(sessionType, hostTag, picksByRole, pingRoleId) {
       '                              ✅  SELECTED ATTENDEES ✅',
       '╚══════════════════════════════════════╝',
       '',
-      `🧊 Host: ${hostTag}`,
-      `🧊 Co-Host: ${formatSingle(picksByRole.cohost)}`,
-      `🧊 Overseer: ${formatSingle(picksByRole.overseer)}`,
+      `🧊 Host: ${formatHostLine(hostTag, hostId, hyraCounts)}`,
+      `🧊 Co-Host: ${formatSingle(picksByRole.cohost, hyraCounts)}`,
+      `🧊 Overseer: ${formatSingle(picksByRole.overseer, hyraCounts)}`,
       '',
       '────────────',
       '',
       '🟡  Interviewers 🟡'
     );
 
-    lines = lines.concat(formatNumberedList(picksByRole.interviewer, 12));
+    lines = lines.concat(formatNumberedList(picksByRole.interviewer, 12, hyraCounts));
 
     lines.push('', '────────────', '', '⚪  Spectators ⚪');
-    lines = lines.concat(formatNumberedList(picksByRole.spectator, 4));
+    lines = lines.concat(formatNumberedList(picksByRole.spectator, 4, hyraCounts));
   } else if (sessionType === 'training') {
     lines.push(
       '╔══════════════════════════════════════╗',
       '                              ✅  SELECTED ATTENDEES ✅',
       '╚══════════════════════════════════════╝',
       '',
-      `🧊 Host: ${hostTag}`,
-      `🧊 Co-Host: ${formatSingle(picksByRole.cohost)}`,
-      `🧊 Overseer: ${formatSingle(picksByRole.overseer)}`,
-      `🧊 Supervisor: ${formatSingle(picksByRole.supervisor)}`,
+      `🧊 Host: ${formatHostLine(hostTag, hostId, hyraCounts)}`,
+      `🧊 Co-Host: ${formatSingle(picksByRole.cohost, hyraCounts)}`,
+      `🧊 Overseer: ${formatSingle(picksByRole.overseer, hyraCounts)}`,
+      `🧊 Supervisor: ${formatSingle(picksByRole.supervisor, hyraCounts)}`,
       '',
       '────────────',
       '',
       '🔴  Trainers 🔴'
     );
 
-    lines = lines.concat(formatNumberedList(picksByRole.trainer, 8));
+    lines = lines.concat(formatNumberedList(picksByRole.trainer, 8, hyraCounts));
 
     lines.push('', '────────────', '', '⚪  Spectators ⚪');
-    lines = lines.concat(formatNumberedList(picksByRole.spectator, 4));
+    lines = lines.concat(formatNumberedList(picksByRole.spectator, 4, hyraCounts));
   } else {
     // mass_shift
     lines.push(
@@ -412,16 +451,16 @@ function buildAttendeesMessage(sessionType, hostTag, picksByRole, pingRoleId) {
       '                              ✅  SELECTED ATTENDEES ✅',
       '╚══════════════════════════════════════╝',
       '',
-      `🧊 Host: ${hostTag}`,
-      `🧊 Co-Host: ${formatSingle(picksByRole.cohost)}`,
-      `🧊 Overseer: ${formatSingle(picksByRole.overseer)}`,
+      `🧊 Host: ${formatHostLine(hostTag, hostId, hyraCounts)}`,
+      `🧊 Co-Host: ${formatSingle(picksByRole.cohost, hyraCounts)}`,
+      `🧊 Overseer: ${formatSingle(picksByRole.overseer, hyraCounts)}`,
       '',
       '────────────',
       '',
       '🟣  Attendees  🟣'
     );
 
-    lines = lines.concat(formatNumberedList(picksByRole.attendee, 15));
+    lines = lines.concat(formatNumberedList(picksByRole.attendee, 15, hyraCounts));
   }
 
   lines.push(
@@ -432,27 +471,6 @@ function buildAttendeesMessage(sessionType, hostTag, picksByRole, pingRoleId) {
 
   const ping = pingRoleId ? `<@&${pingRoleId}>` : '';
   return ping ? `${ping}\n\n${lines.join('\n')}` : lines.join('\n');
-}
-
-function formatSingle(arr) {
-  if (!arr || !arr.length) return 'N/A';
-  const u = arr[0];
-  return `<@${u.userId}>`;
-}
-
-function formatNumberedList(arr, maxCount) {
-  const lines = [];
-  const picks = arr || [];
-  for (let i = 0; i < maxCount; i++) {
-    const spot = i + 1;
-    const u = picks[i];
-    if (u) {
-      lines.push(`${spot}. <@${u.userId}>`);
-    } else {
-      lines.push(`${spot}.`);
-    }
-  }
-  return lines;
 }
 
 // ===== CORE: OPEN QUEUE (NO INTERACTION HERE) =====
@@ -763,6 +781,11 @@ async function closeQueueAndPostAttendees(queue, client) {
       allUserIds.add(u.userId);
     }
   }
+  // Include host in Hyra stats as well
+  if (queue.hostId) {
+    allUserIds.add(queue.hostId);
+  }
+
   const allIdsArray = Array.from(allUserIds);
 
   let hyraCounts = {};
@@ -807,7 +830,14 @@ async function closeQueueAndPostAttendees(queue, client) {
   }
 
   const pingRoleId = QUEUE_PING_ROLES[queue.sessionType] || '';
-  const text = buildAttendeesMessage(queue.sessionType, queue.hostTag, picksByRole, pingRoleId);
+  const text = buildAttendeesMessage(
+    queue.sessionType,
+    queue.hostTag,
+    queue.hostId,
+    picksByRole,
+    pingRoleId,
+    hyraCounts
+  );
 
   await attendeeChannel.send({
     content: text,
