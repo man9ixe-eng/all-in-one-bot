@@ -6,47 +6,47 @@ const { openQueueForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open a queue for a scheduled session Trello card.')
-    .addStringOption(option =>
-      option
+    .setDescription('Manually open a session queue for a Trello card.')
+    .addStringOption(opt =>
+      opt
         .setName('card')
-        .setDescription('Trello card link or short ID for the session.')
-        .setRequired(true)
+        .setDescription('Trello card link or short ID')
+        .setRequired(true),
     ),
 
   async execute(interaction) {
-    const trelloCardUrl = interaction.options.getString('card', true);
-
-    // Acknowledge fast so Discord doesn’t time out
-    await interaction.deferReply({ ephemeral: true });
+    const card = interaction.options.getString('card', true);
 
     try {
-      const result = await openQueueForCard({
-        client: interaction.client,
-        trelloCardUrl,
-      });
+      const ok = await openQueueForCard(interaction.client, card, { force: true });
 
-      if (!result || !result.ok) {
-        await interaction.editReply({
-          content:
-            (result && result.message) ||
-            'I could not open a queue for that Trello card.',
+      if (ok) {
+        await interaction.reply({
+          content: '✅ Queue opened for that Trello card (or was already open).',
+          ephemeral: true,
         });
-        return;
+      } else {
+        await interaction.reply({
+          content:
+            'I could not open a queue for that Trello card.\n' +
+            '• Make sure the link is valid\n' +
+            '• The card has the correct session labels or [Interview], [Training], [Mass Shift] in the name\n' +
+            '• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
+          ephemeral: true,
+        });
       }
-
-      await interaction.editReply({
-        content: '✅ Queue opened successfully for that session.',
-      });
     } catch (err) {
-      console.error('[SESSIONQUEUE] Error in /sessionqueue:', err);
-      try {
-        await interaction.editReply({
-          content:
-            'There was an error while opening the queue. Please check the logs or try again.',
-        });
-      } catch {
-        // ignore
+      console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', err);
+
+      if (!interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({
+            content: 'There was an error while executing this interaction.',
+            ephemeral: true,
+          });
+        } catch {
+          // ignore
+        }
       }
     }
   },
