@@ -44,14 +44,15 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// Command collection
 client.commands = new Collection();
 
 // ===== LOAD COMMANDS (src/commands/**) =====
 
 const commandsPathRoot = path.join(__dirname, 'commands');
+
 if (fs.existsSync(commandsPathRoot)) {
   const commandFolders = fs.readdirSync(commandsPathRoot);
+
   for (const folder of commandFolders) {
     const commandsPath = path.join(commandsPathRoot, folder);
     const commandFiles = fs
@@ -76,11 +77,12 @@ if (fs.existsSync(commandsPathRoot)) {
 
 // ===== EVENTS =====
 
-client.once('ready', () => {
+// Modern ready event (no deprecation)
+client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Session announcements: runs every minute
+// Session announcements: 30 minutes before due (checks every 1 minute)
 setInterval(async () => {
   try {
     console.log('[AUTO] Session announcement tick...');
@@ -88,10 +90,11 @@ setInterval(async () => {
   } catch (err) {
     console.error('[AUTO] Session announcement error:', err);
   }
-}, 60 * 1000); // check every 1 minute
+}, 60 * 1000);
 
-// MessageCreate: automod + simple prefix ping
+// MessageCreate: automod + simple prefix command
 client.on('messageCreate', async (message) => {
+  // Run automod first (bad words, spam, etc.)
   try {
     await handleMessageAutomod(message);
   } catch (err) {
@@ -99,19 +102,22 @@ client.on('messageCreate', async (message) => {
   }
 
   if (message.author.bot) return;
+
+  // Simple example prefix command
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
 });
 
-// Single Interaction handler (slash commands + queue buttons)
+// ===== SINGLE InteractionCreate HANDLER (buttons + slash commands) =====
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 1) Buttons – queue system, etc.
+    // 1) Button interactions – queue system
     if (interaction.isButton()) {
       const handled = await handleQueueButtonInteraction(interaction);
-      if (handled) return;
-      // if not ours, it falls through to future button handlers if you add any
+      if (handled) return; // do NOT fall through if we handled it
+      // if not handled by queue system, it just falls through to normal commands (if needed)
     }
 
     // 2) Slash commands
@@ -137,7 +143,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
     } catch {
-      // ignore secondary errors
+      // ignore double-reply errors
     }
   }
 });
