@@ -118,6 +118,7 @@ function buildQueueEmbed(sessionType, card, hostTag, dueUnix) {
     lines.push('ℹ️  **Co-Host:** Corporate Intern+');
     lines.push('ℹ️  **Overseer:** Executive Manager+');
     lines.push('ℹ️  **Trainer (8):** Leadership Intern+');
+    lines.push('ℹ️  **Supervisor (4):** Assistant Manager+');
     lines.push('ℹ️  **Spectator (4):** Leadership Intern+');
     lines.push('');
     lines.push('❓  HOW TO JOIN THE QUEUE ❓');
@@ -229,6 +230,10 @@ function buildQueueButtons(sessionType, cardId) {
       new ButtonBuilder()
         .setCustomId(`queue:training:trainer:${cardId}`)
         .setLabel('Trainer')
+        .setStyle(ButtonStyle.Success),
+     new ButtonBuilder()
+        .setCustomId(`queue:training:supervisor:${cardId}`)
+        .setLabel('Supervisor')
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(`queue:training:spectator:${cardId}`)
@@ -364,6 +369,8 @@ async function handleQueueButtonInteraction(interaction) {
       ? 'Trainer'
       : role === 'spectator'
       ? 'Spectator'
+      : role === 'supervisor'
+      ? 'Supervisor'
       : role === 'attendee'
       ? 'Attendee'
       : role;
