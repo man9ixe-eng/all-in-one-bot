@@ -7,6 +7,7 @@ const {
   TRELLO_LIST_INTERVIEW_ID,
   TRELLO_LIST_TRAINING_ID,
   TRELLO_LIST_MASS_SHIFT_ID,
+  TRELLO_LIST_COMPLETED_ID,     // <- IMPORTANT: now imported
   TRELLO_LABEL_SCHEDULED_ID,
   TRELLO_LABEL_INTERVIEW_ID,
   TRELLO_LABEL_TRAINING_ID,
@@ -16,13 +17,32 @@ const {
 } = require('../config/trello');
 
 /**
- * Generic Trello request using built-in fetch (Node 18+)
+ * Flexible Trello request helper.
+ *
+ * Supports BOTH:
+ *   trelloRequest('/cards/XYZ', 'GET', { fields: 'name' })
+ *   trelloRequest('/cards/XYZ', { fields: 'name' })   // method defaults to GET
  */
-async function trelloRequest(path, method = 'GET', query = {}) {
+async function trelloRequest(path, methodOrQuery, maybeQuery) {
   if (!TRELLO_KEY || !TRELLO_TOKEN) {
     console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN');
     return { ok: false, status: 0, data: null };
   }
+
+  // Normalise arguments
+  let method = 'GET';
+  let query = {};
+
+  if (typeof methodOrQuery === 'string') {
+    // trelloRequest(path, 'POST', { ... })
+    method = methodOrQuery;
+    if (maybeQuery && typeof maybeQuery === 'object') {
+      query = maybeQuery;
+    }
+  } else if (typeof methodOrQuery === 'object' && methodOrQuery !== null) {
+    // trelloRequest(path, { ... })
+    query = methodOrQuery;
+  } // else: use defaults (GET, {})
 
   const url = new URL(`https://api.trello.com/1${path}`);
   url.searchParams.set('key', TRELLO_KEY);
@@ -35,12 +55,13 @@ async function trelloRequest(path, method = 'GET', query = {}) {
   }
 
   try {
-    const res = await fetch(url, { method });
+    const res = await fetch(url.toString(), { method: String(method).toUpperCase() });
+
     let data = null;
     try {
       data = await res.json();
     } catch {
-      // ignore non-JSON
+      // non-JSON, ignore
     }
 
     if (res.status !== 200 && res.status !== 201) {
@@ -127,7 +148,7 @@ async function createSessionCard({
     idList: listId,
     name,
     desc: descLines.join('\n'),
-    pos: 'bottom', // keeps your header cards at the top
+    pos: 'bottom',
     due: dueISO || null,
   };
 
@@ -154,6 +175,10 @@ async function createSessionCard({
 
 /**
  * Helper to describe how far from due time an action happened.
+ * Returns a string like:
+ *  - "13 minutes after scheduled time"
+ *  - "5 minutes before scheduled time"
+ *  - "exactly on time"
  */
 function describeTimeDiff(dueISO) {
   if (!dueISO) return '';
@@ -176,34 +201,41 @@ function describeTimeDiff(dueISO) {
 
 /**
  * Cancel a session card by Trello card ID or shortlink.
+ * - REMOVE SCHEDULED / COMPLETED
+ * - ADD CANCELED
+ * - Keep type labels
+ * - Mark due as complete
+ * - Move to COMPLETED list (top) if configured
+ * - Append minutes-from-due info to description
  */
 async function cancelSessionCard({ cardId, reason }) {
   if (!cardId) return false;
 
-  // 1) Load current card info
   const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
     fields: 'idLabels,desc,due',
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error('[TRELLO] cancelSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
+    console.error(
+      '[TRELLO] cancelSessionCard: failed to load card',
+      cardId,
+      cardRes.status,
+      cardRes.data
+    );
     return false;
   }
 
   const card = cardRes.data;
   const currentLabels = Array.isArray(card.idLabels) ? card.idLabels.slice() : [];
 
-  // Label math: swap SCHEDULED -> CANCELED, keep everything else
   const labelSet = new Set(currentLabels);
   if (TRELLO_LABEL_SCHEDULED_ID) labelSet.delete(TRELLO_LABEL_SCHEDULED_ID);
   if (TRELLO_LABEL_COMPLETED_ID) labelSet.delete(TRELLO_LABEL_COMPLETED_ID);
   if (TRELLO_LABEL_CANCELED_ID) labelSet.add(TRELLO_LABEL_CANCELED_ID);
   const newLabels = Array.from(labelSet);
 
-  // Time diff
   const timeDiffStr = describeTimeDiff(card.due);
 
-  // Build new description
   const descLines = [];
   if (card.desc && card.desc.trim().length > 0) {
     descLines.push(card.desc.trim(), '');
@@ -224,11 +256,16 @@ async function cancelSessionCard({ cardId, reason }) {
   });
 
   if (!res1.ok) {
-    console.error('[TRELLO] cancelSessionCard: failed to update card', cardId, res1.status, res1.data);
+    console.error(
+      '[TRELLO] cancelSessionCard: failed to update card',
+      cardId,
+      res1.status,
+      res1.data
+    );
     return false;
   }
 
-  // Move to Completed list
+  // Move to Completed list if configured
   if (TRELLO_LIST_COMPLETED_ID) {
     await trelloRequest(`/cards/${cardId}`, 'PUT', {
       idList: TRELLO_LIST_COMPLETED_ID,
@@ -242,6 +279,12 @@ async function cancelSessionCard({ cardId, reason }) {
 
 /**
  * Mark a session card as completed.
+ * - REMOVE SCHEDULED / CANCELED
+ * - ADD COMPLETED
+ * - Keep type labels
+ * - Mark due as complete
+ * - Move to COMPLETED list (top) if configured
+ * - Append minutes-from-due info to description
  */
 async function completeSessionCard({ cardId }) {
   if (!cardId) return false;
@@ -251,7 +294,12 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error('[TRELLO] completeSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
+    console.error(
+      '[TRELLO] completeSessionCard: failed to load card',
+      cardId,
+      cardRes.status,
+      cardRes.data
+    );
     return false;
   }
 
@@ -283,7 +331,12 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!res1.ok) {
-    console.error('[TRELLO] completeSessionCard: failed to update card', cardId, res1.status, res1.data);
+    console.error(
+      '[TRELLO] completeSessionCard: failed to update card',
+      cardId,
+      res1.status,
+      res1.data
+    );
     return false;
   }
 
@@ -324,12 +377,4 @@ module.exports = {
   cancelSessionCard,
   completeSessionCard,
   moveToCompletedList,
-
-  // Export label IDs so the queue system can detect session type
-  TRELLO_LABEL_INTERVIEW_ID,
-  TRELLO_LABEL_TRAINING_ID,
-  TRELLO_LABEL_MASS_SHIFT_ID,
-  TRELLO_LABEL_SCHEDULED_ID,
-  TRELLO_LABEL_COMPLETED_ID,
-  TRELLO_LABEL_CANCELED_ID,
 };
