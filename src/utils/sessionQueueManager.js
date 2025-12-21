@@ -4,7 +4,10 @@
  * Session Queue + Attendees + Hyra priority
  *
  * Exports:
- *   - openQueueForCard({ client, interaction, trelloCardUrl })
+ *   - openQueueForCard({ client, trelloCardUrl })
+ *       -> returns { ok: true, message?: string } on success
+ *         or { ok: false, message: string } on failure
+ *
  *   - handleQueueButtonInteraction(interaction)
  *
  * Flow:
@@ -82,7 +85,7 @@ const ROLE_CAPACITY = {
   training: {
     cohost: 1,
     overseer: 1,
-    supervisor: 4, // NEW: Supervisor (4)
+    supervisor: 4, // Supervisor (4)
     trainer: 8,
     spectator: 4,
   },
@@ -122,7 +125,7 @@ const ROLE_CAPACITY = {
  */
 const activeQueues = new Map();
 
-// ===== TRELL0 HELPERS =====
+// ===== TRELLO HELPERS =====
 
 function parseCardIdFromInput(option) {
   if (!option) return null;
@@ -205,21 +208,23 @@ function isoToDiscordTimestamps(iso) {
 
 function buildQueueHeaderLine(sessionType, hostTag, timeStr) {
   if (sessionType === 'interview') {
-    return '🟡 INTERVIEW | ' + hostTag + ' | ' + timeStr + ' 🟡';
+    return `🟡 INTERVIEW | ${hostTag} | ${timeStr} 🟡`;
   }
   if (sessionType === 'training') {
-    return '🔴 TRAINING | ' + hostTag + ' | ' + timeStr + ' 🔴';
+    return `🔴 TRAINING | ${hostTag} | ${timeStr} 🔴`;
   }
-  return '🟣 MASS SHIFT | ' + hostTag + ' | ' + timeStr + ' 🟣';
+  return `🟣 MASS SHIFT | ${hostTag} | ${timeStr} 🟣`;
 }
 
-function buildQueueBodyText(sessionType, hostTag, dueTs, trelloUrl) {
-  const { rel, time } = isoToDiscordTimestamps(dueTs);
+function buildQueueBodyText(sessionType, hostTag, dueIso, trelloUrl) {
+  const { rel, time } = isoToDiscordTimestamps(dueIso);
 
+  const prettyTime =
+    time === 'N/A' ? 'TIME' : time.replace(/^<t:\d+:t>$/, 'TIME');
   const titleLine = buildQueueHeaderLine(
     sessionType,
     hostTag || 'HOST',
-    time === 'N/A' ? 'TIME' : time.replace(/<\/?t:[^>]+>/g, 'TIME')
+    prettyTime
   );
 
   const baseLines = [
@@ -450,64 +455,69 @@ function formatNumberedList(arr, maxCount) {
   return lines;
 }
 
-// ===== CORE: OPEN QUEUE =====
+// ===== CORE: OPEN QUEUE (NO INTERACTION HERE) =====
 
-async function openQueueForCard({ client, interaction, trelloCardUrl }) {
+async function openQueueForCard({ client, trelloCardUrl }) {
   const cardId = parseCardIdFromInput(trelloCardUrl);
   if (!cardId) {
-    await interaction.reply({
-      content:
+    return {
+      ok: false,
+      message:
         'I could not open a queue for that Trello card.\n• Make sure the link is valid\n• The card has the correct session labels or [Interview], [Training], [Mass Shift] in the name\n• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
-      ephemeral: true,
-    });
-    return;
+    };
   }
 
   // Load card from Trello
   const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
-    fields: 'name,desc,due,idList,shortUrl',
+    fields: 'name,desc,due,idList,shortUrl,url',
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error('[QUEUE] Failed to fetch Trello card', cardId, cardRes.status, cardRes.data);
-    await interaction.reply({
-      content: 'I could not load that Trello card from Trello. Please check the link.',
-      ephemeral: true,
-    });
-    return;
+    console.error(
+      '[QUEUE] Failed to fetch Trello card',
+      cardId,
+      cardRes.status,
+      cardRes.data
+    );
+    return {
+      ok: false,
+      message:
+        'I could not load that Trello card from Trello. Please check the link.',
+    };
   }
 
   const card = cardRes.data;
   const sessionType = detectSessionType(card);
 
   if (!sessionType) {
-    await interaction.reply({
-      content:
+    return {
+      ok: false,
+      message:
         'I could not determine the session type from that card.\nMake sure the name starts with [Interview], [Training], or [Mass Shift].',
-      ephemeral: true,
-    });
-    return;
+    };
   }
 
   const queueChannelId = QUEUE_CHANNELS[sessionType];
   if (!queueChannelId) {
     console.log('[QUEUE] Missing channel config for session type:', sessionType);
-    await interaction.reply({
-      content:
+    return {
+      ok: false,
+      message:
         'I could not open a queue for that Trello card.\n• Make sure the link is valid\n• The card has the correct session labels or [Interview], [Training], [Mass Shift] in the name\n• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
-      ephemeral: true,
-    });
-    return;
+    };
   }
 
   const queueChannel = await client.channels.fetch(queueChannelId).catch(() => null);
   if (!queueChannel || !queueChannel.isTextBased()) {
-    console.error('[QUEUE] Configured queue channel is invalid or not text-based:', queueChannelId);
-    await interaction.reply({
-      content: 'The configured queue channel is invalid or not text-based. Please check the env vars.',
-      ephemeral: true,
-    });
-    return;
+    console.error(
+      '[QUEUE] Configured queue channel is invalid or not text-based:',
+      queueChannelId
+    );
+    return {
+      ok: false,
+      message:
+        'The configured queue channel is invalid or not text-based. Please check the env vars.',
+    };
   }
 
   const { hostTag, hostId } = parseHostFromDesc(card.desc || '');
@@ -569,10 +579,12 @@ async function openQueueForCard({ client, interaction, trelloCardUrl }) {
 
   activeQueues.set(cardId, queueState);
 
-  await interaction.reply({
-    content: '✅ Queue opened successfully for that session.',
-    ephemeral: true,
-  });
+  console.log('[QUEUE] Opened queue for card', cardId, 'in channel', queueChannelId);
+
+  return {
+    ok: true,
+    message: 'Queue opened successfully.',
+  };
 }
 
 // ===== HANDLE BUTTON INTERACTIONS =====
@@ -684,9 +696,6 @@ async function handleJoinRole(interaction, queue, roleKey) {
     return;
   }
 
-  // (Optional) You could restrict by Discord roles here if you want,
-  // but for now we assume they know their rank.
-
   // Remove them from any other role queues for this card
   for (const [rk, list] of Object.entries(queue.roles)) {
     const idx = list.findIndex(x => x.userId === userId);
@@ -734,7 +743,9 @@ async function closeQueueAndPostAttendees(queue, client) {
       if (msg && msg.edit) {
         const disabledComponents = msg.components.map(row => {
           const newRow = ActionRowBuilder.from(row);
-          newRow.components = row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true));
+          newRow.components.forEach(component => {
+            component.setDisabled(true);
+          });
           return newRow;
         });
 
