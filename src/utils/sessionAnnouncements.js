@@ -24,7 +24,7 @@ const { trelloRequest } = require('./trelloClient');
 const {
   setSessionPost,
   getSessionPost,
-  clearSessionPost,
+  clearSessionPost, // you might not use this here, but it's fine to keep
 } = require('./sessionPostsStore');
 
 // Game links per session type
@@ -129,33 +129,32 @@ function buildSessionEmbed(sessionType, card, dueUnix) {
 
   const titleBase = card.name || `[${humanType}] Upcoming Session`;
   const trelloUrl = card.shortUrl || card.url || 'N/A';
-
   const gameLink = GAME_LINKS[sessionType] || 'N/A';
 
-  const descLines = [
-    '╔══════════════════════════════════════╗',
-    `              ${emoji}  ${humanType.toUpperCase()} STARTING SOON  ${emoji}`,
-    '╚══════════════════════════════════════╝',
-    '',
-    `📌 **Session:** ${titleBase}`,
-    `📌 **Starts:** <t:${dueUnix}:R>`,
-    `📌 **Time:** <t:${dueUnix}:t>`,
-    '',
-    '╭─────── 💠 LINKS 💠 ───────────╮',
-    〰️ **Trello Card:** ${trelloUrl}`,
-    `〰️ **Game Link:** ${gameLink}`,
-    '╰──────────────────────────────╯',
-  ];
+  const descLines = [];
+
+  descLines.push('╔══════════════════════════════════════╗');
+  descLines.push(`          ${emoji}  ${humanType.toUpperCase()} STARTING SOON  ${emoji}`);
+  descLines.push('╚══════════════════════════════════════╝');
+  descLines.push('');
+  descLines.push(`📌 **Session:** ${titleBase}`);
+  descLines.push(`📌 **Starts:** <t:${dueUnix}:R>`);
+  descLines.push(`📌 **Time:** <t:${dueUnix}:t>`);
+  descLines.push('');
+  descLines.push('╭─────── 💠 LINKS 💠 ───────────╮');
+  descLines.push('〰️ **Trello Card:** ' + trelloUrl);
+  descLines.push('〰️ **Game Link:** ' + gameLink);
+  descLines.push('╰──────────────────────────────╯');
 
   return {
     title: `${emoji} ${humanType} Session – Starting Soon`,
     description: descLines.join('\n'),
     color:
       sessionType === 'interview'
-        ? 0xF1C40F // yellow-ish
+        ? 0xf1c40f // yellow-ish
         : sessionType === 'training'
-        ? 0xE74C3C // red-ish
-        : 0x9B59B6, // purple-ish
+        ? 0xe74c3c // red-ish
+        : 0x9b59b6, // purple-ish
     footer: {
       text: 'Glace Hotels • Please arrive a few minutes early 💙',
     },
@@ -211,5 +210,4 @@ async function runSessionAnnouncementTick(client) {
 
 module.exports = {
   runSessionAnnouncementTick,
-  // exported in case you want to call manually in the future
 };
