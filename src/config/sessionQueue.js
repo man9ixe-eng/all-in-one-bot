@@ -1,14 +1,22 @@
 // src/config/sessionQueue.js
-// Fill these with your actual channel + role IDs.
+// Env-backed config for the session queue + attendees system.
 
 module.exports = {
-  // Where the queue posts go:
-  INTERVIEW_QUEUE_CHANNEL_ID: '1413992524770705489',
-  TRAINING_QUEUE_CHANNEL_ID: '1413992543431032913',
-  MASS_SHIFT_QUEUE_CHANNEL_ID: '1413992558161301504',
+  // Where the QUEUE embed (with buttons) goes:
+  QUEUE_INTERVIEW_CHANNEL_ID: process.env.QUEUE_INTERVIEW_CHANNEL_ID || null,
+  QUEUE_TRAINING_CHANNEL_ID: process.env.QUEUE_TRAINING_CHANNEL_ID || null,
+  QUEUE_MASSSHIFT_CHANNEL_ID: process.env.QUEUE_MASSSHIFT_CHANNEL_ID || null,
 
-  // Ping roles for each session type:
-  INTERVIEW_PING_ROLE_ID: '1416632006745391114',
-  TRAINING_PING_ROLE_ID: '1439934342972575775',
-  MASS_SHIFT_PING_ROLE_ID: '1447292111308460082',
+  // Where the ATTENDEES TEXT POST should go:
+  QUEUE_INTERVIEW_ATTENDEES_CHANNEL_ID:
+    process.env.QUEUE_INTERVIEW_ATTENDEES_CHANNEL_ID || null,
+  QUEUE_TRAINING_ATTENDEES_CHANNEL_ID:
+    process.env.QUEUE_TRAINING_ATTENDEES_CHANNEL_ID || null,
+  QUEUE_MASSSHIFT_ATTENDEES_CHANNEL_ID:
+    process.env.QUEUE_MASSSHIFT_ATTENDEES_CHANNEL_ID || null,
+
+  // What role to ping for each session type (for both queue + attendees post)
+  QUEUE_INTERVIEW_PING_ROLE_ID: process.env.QUEUE_INTERVIEW_PING_ROLE_ID || null,
+  QUEUE_TRAINING_PING_ROLE_ID: process.env.QUEUE_TRAINING_PING_ROLE_ID || null,
+  QUEUE_MASSSHIFT_PING_ROLE_ID: process.env.QUEUE_MASSSHIFT_PING_ROLE_ID || null,
 };
