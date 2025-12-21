@@ -1,167 +1,181 @@
 // src/utils/sessionQueueManager.js
 
 const {
+  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
 } = require('discord.js');
 
-const { trelloRequest } = require('./trelloClient');
 const {
+  trelloRequest,
   TRELLO_LABEL_INTERVIEW_ID,
   TRELLO_LABEL_TRAINING_ID,
   TRELLO_LABEL_MASS_SHIFT_ID,
-} = require('../config/trello');
+} = require('./trelloClient');
 
-const {
-  QUEUE_INTERVIEW_CHANNEL_ID,
-  QUEUE_TRAINING_CHANNEL_ID,
-  QUEUE_MASS_SHIFT_CHANNEL_ID,
-  ATTENDEES_INTERVIEW_CHANNEL_ID,
-  ATTENDEES_TRAINING_CHANNEL_ID,
-  ATTENDEES_MASS_SHIFT_CHANNEL_ID,
-  HYRA_API_KEY,
-  HYRA_WORKSPACE_ID,
-} = process.env;
+const { getWeeklySessionCounts } = require('./hyraClient');
 
-// ===== IN-MEMORY STATE =====
+// In-memory queue state (per-card)
+const queueState = new Map();
 
-// key: Trello shortLink (like "YFeAVrFM")
-const queues = new Map();
-
-// key: Discord message ID -> cardShortId
-const messageToCard = new Map();
-
-// ===== SESSION TYPE CONFIG =====
-
-const SESSION_TYPE_CONFIG = {
-  interview: {
-    label: 'Interview',
-    queueChannelEnv: 'QUEUE_INTERVIEW_CHANNEL_ID',
-    attendeesChannelEnv: 'ATTENDEES_INTERVIEW_CHANNEL_ID',
-    getQueueChannelId: () => QUEUE_INTERVIEW_CHANNEL_ID,
-    getAttendeesChannelId: () =>
-      ATTENDEES_INTERVIEW_CHANNEL_ID || QUEUE_INTERVIEW_CHANNEL_ID,
-    buttons: [
-      { key: 'cohost', customId: 'queue_interview_cohost', label: 'Co-Host', style: ButtonStyle.Primary, max: 1 },
-      { key: 'overseer', customId: 'queue_interview_overseer', label: 'Overseer', style: ButtonStyle.Primary, max: 1 },
-      { key: 'interviewer', customId: 'queue_interview_interviewer', label: 'Interviewer', style: ButtonStyle.Success, max: 12 },
-      { key: 'spectator', customId: 'queue_interview_spectator', label: 'Spectator', style: ButtonStyle.Secondary, max: 4 },
-    ],
-  },
-  training: {
-    label: 'Training',
-    queueChannelEnv: 'QUEUE_TRAINING_CHANNEL_ID',
-    attendeesChannelEnv: 'ATTENDEES_TRAINING_CHANNEL_ID',
-    getQueueChannelId: () => QUEUE_TRAINING_CHANNEL_ID,
-    getAttendeesChannelId: () =>
-      ATTENDEES_TRAINING_CHANNEL_ID || QUEUE_TRAINING_CHANNEL_ID,
-    buttons: [
-      { key: 'cohost', customId: 'queue_training_cohost', label: 'Co-Host', style: ButtonStyle.Primary, max: 1 },
-      { key: 'overseer', customId: 'queue_training_overseer', label: 'Overseer', style: ButtonStyle.Primary, max: 1 },
-      { key: 'trainer', customId: 'queue_training_trainer', label: 'Trainer', style: ButtonStyle.Success, max: 8 },
-      { key: 'supervisor', customId: 'queue_training_supervisor', label: 'Supervisor', style: ButtonStyle.Success, max: 4 },
-      { key: 'spectator', customId: 'queue_training_spectator', label: 'Spectator', style: ButtonStyle.Secondary, max: 4 },
-    ],
-  },
-  mass_shift: {
-    label: 'Mass Shift',
-    queueChannelEnv: 'QUEUE_MASS_SHIFT_CHANNEL_ID',
-    attendeesChannelEnv: 'ATTENDEES_MASS_SHIFT_CHANNEL_ID',
-    getQueueChannelId: () => QUEUE_MASS_SHIFT_CHANNEL_ID,
-    getAttendeesChannelId: () =>
-      ATTENDEES_MASS_SHIFT_CHANNEL_ID || QUEUE_MASS_SHIFT_CHANNEL_ID,
-    buttons: [
-      { key: 'cohost', customId: 'queue_mass_cohost', label: 'Co-Host', style: ButtonStyle.Primary, max: 1 },
-      { key: 'overseer', customId: 'queue_mass_overseer', label: 'Overseer', style: ButtonStyle.Primary, max: 1 },
-      { key: 'attendee', customId: 'queue_mass_attendee', label: 'Attendee', style: ButtonStyle.Success, max: 15 },
-    ],
-  },
-};
-
-// ===== HELPERS =====
-
-function extractCardShortId(raw) {
+/**
+ * Helper: parse Trello card short ID from link or raw ID.
+ */
+function parseCardId(raw) {
   if (!raw) return null;
-  raw = String(raw).trim();
+  const input = raw.trim();
 
-  const match = raw.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
-  if (match) return match[1];
+  const m = input.match(/https?:\/\/trello\.com\/c\/([A-Za-z0-9]+)/i);
+  if (m) return m[1];
 
-  if (/^[A-Za-z0-9]{8,}$/.test(raw)) return raw;
+  if (/^[A-Za-z0-9]{8,}$/.test(input)) return input;
+
   return null;
 }
 
-function detectSessionType(card) {
+/**
+ * Detect session type from card (by labels or name).
+ */
+function detectSessionTypeFromCard(card) {
+  const labels = Array.isArray(card.idLabels) ? card.idLabels : [];
+
+  if (TRELLO_LABEL_INTERVIEW_ID && labels.includes(TRELLO_LABEL_INTERVIEW_ID)) {
+    return 'interview';
+  }
+  if (TRELLO_LABEL_TRAINING_ID && labels.includes(TRELLO_LABEL_TRAINING_ID)) {
+    return 'training';
+  }
+  if (TRELLO_LABEL_MASS_SHIFT_ID && labels.includes(TRELLO_LABEL_MASS_SHIFT_ID)) {
+    return 'mass_shift';
+  }
+
   const name = (card.name || '').toLowerCase();
-  const labels = card.idLabels || [];
-
-  if (labels.includes(TRELLO_LABEL_INTERVIEW_ID)) return 'interview';
-  if (labels.includes(TRELLO_LABEL_TRAINING_ID)) return 'training';
-  if (labels.includes(TRELLO_LABEL_MASS_SHIFT_ID)) return 'mass_shift';
-
-  if (name.includes('[interview')) return 'interview';
-  if (name.includes('[training')) return 'training';
-  if (name.includes('[mass shift') || name.includes('[mass_shift')) return 'mass_shift';
+  if (name.includes('[interview]')) return 'interview';
+  if (name.includes('[training]')) return 'training';
+  if (name.includes('[mass shift]') || name.includes('[mass_shift]')) {
+    return 'mass_shift';
+  }
 
   return null;
 }
 
-function parseCardMeta(card) {
-  let hostTag = 'Unknown host';
-  let hostId = null;
+/**
+ * Per-session-type config:
+ *  - queue channel env
+ *  - attendees channel env
+ *  - ping role env
+ *  - slots for each role in the queue
+ */
+function getSessionConfig(sessionType) {
+  switch (sessionType) {
+    case 'interview':
+      return {
+        prettyName: 'INTERVIEW',
+        emoji: '🟡',
+        queueChannelId: process.env.SESSION_QUEUE_CHANNEL_INTERVIEW_ID,
+        attendeesChannelId: process.env.SESSION_ATTENDEES_CHANNEL_INTERVIEW_ID,
+        pingRoleId: process.env.SESSION_QUEUE_PING_INTERVIEW_ROLE_ID,
+        slots: {
+          cohost: { label: 'Co-Host', max: 1 },
+          overseer: { label: 'Overseer', max: 1 },
+          interviewer: { label: 'Interviewer', max: 12 },
+          spectator: { label: 'Spectator', max: 4 },
+        },
+      };
 
-  if (card.desc) {
-    const m = card.desc.match(/Host:\s*(.+?)\s*\((\d{15,})\)/i);
+    case 'training':
+      return {
+        prettyName: 'TRAINING',
+        emoji: '🔴',
+        queueChannelId: process.env.SESSION_QUEUE_CHANNEL_TRAINING_ID,
+        attendeesChannelId: process.env.SESSION_ATTENDEES_CHANNEL_TRAINING_ID,
+        pingRoleId: process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID,
+        slots: {
+          cohost: { label: 'Co-Host', max: 1 },
+          overseer: { label: 'Overseer', max: 1 },
+          trainer: { label: 'Trainer', max: 8 },
+          spectator: { label: 'Spectator', max: 4 },
+          supervisor: { label: 'Supervisor', max: 4 }, // extra queue role
+        },
+      };
+
+    case 'mass_shift':
+      return {
+        prettyName: 'MASS SHIFT',
+        emoji: '🟣',
+        queueChannelId: process.env.SESSION_QUEUE_CHANNEL_MASS_SHIFT_ID,
+        attendeesChannelId: process.env.SESSION_ATTENDEES_CHANNEL_MASS_SHIFT_ID,
+        pingRoleId: process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID,
+        slots: {
+          cohost: { label: 'Co-Host', max: 1 },
+          overseer: { label: 'Overseer', max: 1 },
+          attendee: { label: 'Attendee', max: 15 },
+        },
+      };
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * Parse host info out of the Trello card description:
+ * "Host: SOME TAG (1234567890)"
+ */
+function parseHostFromCard(card, fallbackUser) {
+  const desc = card.desc || '';
+  const lines = desc.split(/\r?\n/);
+
+  for (const line of lines) {
+    const m = line.match(/^\s*Host:\s*(.+?)\s*\((\d+)\)\s*$/i);
     if (m) {
-      hostTag = m[1].trim();
-      hostId = m[2];
+      return {
+        hostTagText: m[1],
+        hostDiscordId: m[2],
+      };
     }
   }
 
-  const dueISO = card.due || null;
-  const dueMs = dueISO ? new Date(dueISO).getTime() : NaN;
-  const dueUnix = Number.isNaN(dueMs) ? null : Math.floor(dueMs / 1000);
+  if (fallbackUser) {
+    return {
+      hostTagText: fallbackUser.tag || fallbackUser.username,
+      hostDiscordId: fallbackUser.id,
+    };
+  }
 
-  return { hostTag, hostId, dueISO, dueUnix };
+  return {
+    hostTagText: 'Host',
+    hostDiscordId: null,
+  };
 }
 
-function buildQueueHeader(sessionTypeLabel, hostDisplay, dueUnix, trelloUrl) {
-  const top = '╔══════════════════════════════════════╗';
-  const bottom = '╚══════════════════════════════════════╝';
+/**
+ * Build the queue embed description for each session type.
+ */
+function buildQueueDescription({
+  sessionType,
+  prettyName,
+  emoji,
+  hostMention,
+  unixTimestamp,
+  trelloUrl,
+}) {
+  const relative = unixTimestamp ? `<t:${unixTimestamp}:R>` : 'N/A';
+  const absolute = unixTimestamp ? `<t:${unixTimestamp}:t>` : 'N/A';
 
-  let titleEmoji = '🟡';
-  if (sessionTypeLabel === 'Training') titleEmoji = '🔴';
-  if (sessionTypeLabel === 'Mass Shift') titleEmoji = '🟣';
-
-  const titleLine =
-    `${titleEmoji} ${sessionTypeLabel.toUpperCase()} | HOST | TIME ${titleEmoji}`;
-
-  // crude center: pad with spaces
-  const maxWidth = 38;
-  const pad = Math.max(0, Math.floor((maxWidth - titleLine.length) / 2));
-  const centered = ' '.repeat(pad) + titleLine;
-
-  const startsText = dueUnix ? `<t:${dueUnix}:R>` : 'Unknown';
-  const timeText = dueUnix ? `<t:${dueUnix}:t>` : 'Unknown';
-
-  return [
-    top,
-    centered,
-    bottom,
-    '',
-    `📌 Host: ${hostDisplay}`,
-    `📌 Starts: ${startsText}`,
-    `📌 Time: ${timeText}`,
-    '',
-    '💠 ROLES 💠',
-    '----------------------------------------------------------------',
-  ].join('\n');
-}
-
-function buildQueueBody(sessionType, trelloUrl) {
   if (sessionType === 'interview') {
     return [
+      '╔══════════════════════════════════════╗',
+      `${emoji} ${prettyName} | ${hostMention} | ${absolute} ${emoji}`,
+      '╚══════════════════════════════════════╝',
+      '',
+      `📌 Host: ${hostMention}`,
+      `📌 Starts: ${relative}`,
+      `📌 Time: ${absolute}`,
+      '',
+      '💠 ROLES 💠',
+      '----------------------------------------------------------------',
       'ℹ️  **Co-Host:** Corporate Intern+',
       'ℹ️  **Overseer:** Executive Manager+',
       'ℹ️  **Interviewer (12):** Leadership Intern+',
@@ -169,14 +183,14 @@ function buildQueueBody(sessionType, trelloUrl) {
       '',
       '❓  HOW TO JOIN THE QUEUE ❓',
       '----------------------------------------------------------------',
-      'Check the role list above — if your rank is allowed, press the role button you want.',
-      'You’ll get a private message that says you were added to that role\'s queue.',
-      'Do NOT join the game until the attendees post is made in the attendees channel.',
+      '- Check the role list above — if your rank is allowed, press the role button you want.',
+      "- You’ll get a private message that says you were added to that role's queue.",
+      '- Do NOT join the game until the attendees post is made in the attendees channel.',
       '',
       '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓',
       '----------------------------------------------------------------',
-      'Click the "Leave Queue" button once you have joined a role.',
-      'After the attendees post is made, changes must be handled by the host/corporates manually.',
+      '- Click the "Leave Queue" button once you have joined a role.',
+      '- After the attendees post is made, changes must be handled by the host/corporate manually.',
       '',
       '----------------------------------------------------------------',
       '╭─────── 💠 LINKS 💠 ───────────╮',
@@ -187,22 +201,32 @@ function buildQueueBody(sessionType, trelloUrl) {
 
   if (sessionType === 'training') {
     return [
+      '╔══════════════════════════════════════╗',
+      `${emoji} ${prettyName} | ${hostMention} | ${absolute} ${emoji}`,
+      '╚══════════════════════════════════════╝',
+      '',
+      `📌 Host: ${hostMention}`,
+      `📌 Starts: ${relative}`,
+      `📌 Time: ${absolute}`,
+      '',
+      '💠 ROLES 💠',
+      '----------------------------------------------------------------',
       'ℹ️  **Co-Host:** Corporate Intern+',
       'ℹ️  **Overseer:** Executive Manager+',
       'ℹ️  **Trainer (8):** Leadership Intern+',
-      'ℹ️  **Supervisor (4):** Supervisor+',
       'ℹ️  **Spectator (4):** Leadership Intern+',
+      'ℹ️  **Supervisor (4):** Supervisor+',
       '',
       '❓  HOW TO JOIN THE QUEUE ❓',
       '----------------------------------------------------------------',
-      'Check the role list above — if your rank is allowed, press the role button you want.',
-      'You’ll get a private message that says you were added to that role\'s queue.',
-      'Do NOT join the game until the attendees post is made in the attendees channel.',
+      '- Check the role list above — if your rank is allowed, press the role button you want.',
+      "- You’ll get a private message that says you were added to that role's queue.",
+      '- Do NOT join the game until the attendees post is made in the attendees channel.',
       '',
       '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓',
       '----------------------------------------------------------------',
-      'Click the "Leave Queue" button once you have joined a role.',
-      'After the attendees post is made, changes must be handled by the host/corporates manually.',
+      '- Click the "Leave Queue" button once you have joined a role.',
+      '- After the attendees post is made, changes must be handled by the host/corporate manually.',
       '',
       '----------------------------------------------------------------',
       '╭─────── 💠 LINKS 💠 ───────────╮',
@@ -213,20 +237,30 @@ function buildQueueBody(sessionType, trelloUrl) {
 
   // mass shift
   return [
+    '╔══════════════════════════════════════╗',
+    `${emoji} ${prettyName} | ${hostMention} | ${absolute} ${emoji}`,
+    '╚══════════════════════════════════════╝',
+    '',
+    `📌 Host: ${hostMention}`,
+    `📌 Starts: ${relative}`,
+    `📌 Time: ${absolute}`,
+    '',
+    '💠 ROLES 💠',
+    '----------------------------------------------------------------',
     'ℹ️  **Co-Host:** Corporate Intern+',
     'ℹ️  **Overseer:** Executive Manager+',
     'ℹ️  **Attendee:** Leadership Intern+',
     '',
     '❓  HOW TO JOIN THE QUEUE ❓',
     '----------------------------------------------------------------',
-    'Check the role list above — if your rank is allowed, press the role button you want.',
-    'You’ll get a private message that says you were added to that role\'s queue.',
-    'Do NOT join the game until the attendees post is made in the attendees channel.',
+    '- Check the role list above — if your rank is allowed, press the role button you want.',
+    "- You’ll get a private message that says you were added to that role's queue.",
+    '- Do NOT join the game until the attendees post is made in the attendees channel.',
     '',
     '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓',
     '----------------------------------------------------------------',
-    'Click the "Leave Queue" button once you have joined a role.',
-    'After the attendees post is made, changes must be handled by the host/corporates manually.',
+    '- Click the "Leave Queue" button once you have joined a role.',
+    '- After the attendees post is made, changes must be handled by the host/corporate manually.',
     '',
     '----------------------------------------------------------------',
     '╭─────── 💠 LINKS 💠 ───────────╮',
@@ -235,608 +269,735 @@ function buildQueueBody(sessionType, trelloUrl) {
   ].join('\n');
 }
 
-function roleLabelFor(sessionType, roleKey) {
+/**
+ * Build Discord button rows for the queue.
+ */
+function buildQueueButtons(sessionType) {
+  const row1 = new ActionRowBuilder();
+  const row2 = new ActionRowBuilder();
+
   if (sessionType === 'interview') {
-    if (roleKey === 'cohost') return 'Co-Host';
-    if (roleKey === 'overseer') return 'Overseer';
-    if (roleKey === 'interviewer') return 'Interviewer';
-    if (roleKey === 'spectator') return 'Spectator';
-  }
-  if (sessionType === 'training') {
-    if (roleKey === 'cohost') return 'Co-Host';
-    if (roleKey === 'overseer') return 'Overseer';
-    if (roleKey === 'trainer') return 'Trainer';
-    if (roleKey === 'supervisor') return 'Supervisor';
-    if (roleKey === 'spectator') return 'Spectator';
-  }
-  if (sessionType === 'mass_shift') {
-    if (roleKey === 'cohost') return 'Co-Host';
-    if (roleKey === 'overseer') return 'Overseer';
-    if (roleKey === 'attendee') return 'Attendee';
-  }
-  return roleKey;
-}
-
-function customIdToRoleKey(customId) {
-  if (!customId.startsWith('queue_')) return null;
-  if (customId === 'queue_leave') return 'leave';
-
-  const parts = customId.split('_'); // e.g. ["queue", "training", "trainer"]
-  const key = parts[2];
-  return key || null;
-}
-
-function removeUserFromAllRoles(state, userId) {
-  let removed = false;
-  for (const role of Object.values(state.roles)) {
-    const before = role.members.length;
-    role.members = role.members.filter(m => m.userId !== userId);
-    if (role.members.length !== before) removed = true;
-  }
-  return removed;
-}
-
-// ===== HYRA (OPTIONAL) =====
-
-async function getWeeklySessionCounts() {
-  if (!HYRA_API_KEY || !HYRA_WORKSPACE_ID) {
-    // No config -> gracefully default to 0 for everyone
-    return {};
-  }
-
-  try {
-    const url = new URL(
-      `https://api.hyra.io/v1/workspaces/${HYRA_WORKSPACE_ID}/staff/dashboard`
-    );
-    // If Hyra requires a query (period=week or similar), you can adjust here:
-    // url.searchParams.set('period', 'week');
-
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${HYRA_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok || !data) {
-      console.error('[HYRA] API error', res.status, data);
-      console.error('[HYRA] getWeeklySessionCounts: failed to retrieve staff dashboard.');
-      return {};
-    }
-
-    // This part depends on Hyra's actual JSON structure.
-    // Adjust mapping once you know the real keys.
-    const counts = {};
-    const staffArray = data.staff || data.data || [];
-    for (const s of staffArray) {
-      const discordId = s.discordId || s.discord_id;
-      if (!discordId) continue;
-
-      const sessions =
-        s.sessionsThisWeek ??
-        s.sessions_this_week ??
-        s.sessions ??
-        0;
-
-      counts[String(discordId)] = sessions;
-    }
-
-    return counts;
-  } catch (err) {
-    console.error('[HYRA] Network error', err);
-    return {};
-  }
-}
-
-function countFor(weeklyCounts, userId) {
-  return weeklyCounts[String(userId)] ?? 0;
-}
-
-// ===== QUEUE OPEN (USED BY /sessionqueue) =====
-
-async function openQueueForCard({ client, rawCardInput }) {
-  const cardShortId = extractCardShortId(rawCardInput);
-  if (!cardShortId) {
-    console.warn('[QUEUE] Could not parse Trello card id from:', rawCardInput);
-    return false;
-  }
-
-  const cardRes = await trelloRequest(`/cards/${cardShortId}`, 'GET', {
-    fields: 'id,name,shortLink,idLabels,due,desc',
-  });
-
-  if (!cardRes.ok || !cardRes.data) {
-    console.error('[QUEUE] Failed to load Trello card', cardShortId, cardRes.status, cardRes.data);
-    return false;
-  }
-
-  const card = cardRes.data;
-  const sessionType = detectSessionType(card);
-
-  if (!sessionType) {
-    console.warn('[QUEUE] Could not determine session type for card:', cardShortId);
-    return false;
-  }
-
-  const typeConfig = SESSION_TYPE_CONFIG[sessionType];
-  if (!typeConfig) {
-    console.warn('[QUEUE] No type config for', sessionType);
-    return false;
-  }
-
-  const queueChannelId = typeConfig.getQueueChannelId();
-  const attendeesChannelId = typeConfig.getAttendeesChannelId();
-
-  if (!queueChannelId) {
-    console.warn('[QUEUE] Missing channel config for session type:', sessionType);
-    return false;
-  }
-
-  const queueChannel = await client.channels.fetch(queueChannelId).catch(() => null);
-  if (!queueChannel) {
-    console.error('[QUEUE] Failed to fetch queue channel', queueChannelId);
-    return false;
-  }
-
-  const { hostTag, hostId, dueISO, dueUnix } = parseCardMeta(card);
-  const hostDisplay = hostId ? `<@${hostId}>` : hostTag;
-  const trelloUrl = card.shortUrl || card.url || `https://trello.com/c/${card.shortLink || cardShortId}`;
-
-  const header = buildQueueHeader(typeConfig.label, hostDisplay, dueUnix, trelloUrl);
-  const body = buildQueueBody(sessionType, trelloUrl);
-  const content = `${header}\n\n${body}`;
-
-  // Build buttons (max 5 per row)
-  const joinRow = new ActionRowBuilder().addComponents(
-    ...typeConfig.buttons.map(btn =>
+    row1.addComponents(
       new ButtonBuilder()
-        .setCustomId(btn.customId)
-        .setLabel(btn.label)
-        .setStyle(btn.style)
-    )
-  );
-
-  const leaveRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('queue_leave')
-      .setLabel('Leave Queue')
-      .setStyle(ButtonStyle.Danger)
-  );
-
-  const queueMessage = await queueChannel.send({
-    content,
-    components: [joinRow, leaveRow],
-  });
-
-  const rolesState = {};
-  for (const btn of typeConfig.buttons) {
-    rolesState[btn.key] = {
-      key: btn.key,
-      max: btn.max,
-      members: [], // { userId, joinedAt }
-    };
+        .setCustomId('queue:interview:cohost')
+        .setLabel('Co-Host')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('queue:interview:overseer')
+        .setLabel('Overseer')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('queue:interview:interviewer')
+        .setLabel('Interviewer')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('queue:interview:spectator')
+        .setLabel('Spectator')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('queue:interview:leave')
+        .setLabel('Leave Queue')
+        .setStyle(ButtonStyle.Danger),
+    );
+    return [row1];
   }
 
-  const state = {
-    cardShortId: card.shortLink || cardShortId,
-    cardId: card.id,
-    sessionType,
-    hostId,
-    hostDisplay,
-    dueISO,
-    dueUnix,
-    queueChannelId,
-    attendeesChannelId,
-    queueMessageId: queueMessage.id,
-    queueMessageChannelId: queueMessage.channelId,
-    createdAt: Date.now(),
-    isClosed: false,
-    roles: rolesState,
-  };
-
-  queues.set(state.cardShortId, state);
-  messageToCard.set(queueMessage.id, state.cardShortId);
-
-  console.log(
-    `[QUEUE] Opened queue for card ${state.cardShortId} in channel ${queueChannelId}`
-  );
-  return true;
-}
-
-// ===== ATTENDEES GENERATION (USED BY /sessionattendees) =====
-
-function formatUserWithCount(userId, count) {
-  return `<@${userId}> (${count} session${count === 1 ? '' : 's'})`;
-}
-
-function buildAttendeesMessage(state, weeklyCounts) {
-  const hostLine = state.hostId
-    ? `<@${state.hostId}> (${countFor(weeklyCounts, state.hostId)} sessions)`
-    : state.hostDisplay;
-
-  const getSelected = (roleKey) => {
-    const role = state.roles[roleKey];
-    if (!role) return [];
-
-    const members = [...role.members];
-    members.sort((a, b) => {
-      const aCount = countFor(weeklyCounts, a.userId);
-      const bCount = countFor(weeklyCounts, b.userId);
-      if (aCount !== bCount) return aCount - bCount; // less sessions first
-      return a.joinedAt - b.joinedAt; // earlier join first
-    });
-
-    return members.slice(0, role.max);
-  };
-
-  if (state.sessionType === 'interview') {
-    const cohost = getSelected('cohost')[0] || null;
-    const overseer = getSelected('overseer')[0] || null;
-    const interviewers = getSelected('interviewer');
-    const spectators = getSelected('spectator');
-
-    const lines = [];
-
-    lines.push('╔══════════════════════════════════════╗');
-    lines.push('                              ✅  SELECTED ATTENDEES ✅');
-    lines.push('╚══════════════════════════════════════╝');
-    lines.push('');
-    lines.push(`🧊 Host: ${hostLine}`);
-    lines.push(
-      `🧊 Co-Host: ${
-        cohost ? formatUserWithCount(cohost.userId, countFor(weeklyCounts, cohost.userId)) : '—'
-      }`
-    );
-    lines.push(
-      `🧊 Overseer: ${
-        overseer ? formatUserWithCount(overseer.userId, countFor(weeklyCounts, overseer.userId)) : '—'
-      }`
-    );
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-    lines.push('🟡  Interviewers 🟡');
-
-    const maxInterviewers = state.roles.interviewer.max;
-    for (let i = 0; i < maxInterviewers; i++) {
-      const entry = interviewers[i];
-      if (entry) {
-        const c = countFor(weeklyCounts, entry.userId);
-        lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
-      } else {
-        lines.push(`${i + 1}. —`);
-      }
-    }
-
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-    lines.push('⚪  Spectators ⚪');
-
-    const maxSpectators = state.roles.spectator.max;
-    for (let i = 0; i < maxSpectators; i++) {
-      const entry = spectators[i];
-      if (entry) {
-        const c = countFor(weeklyCounts, entry.userId);
-        lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
-      } else {
-        lines.push(`${i + 1}. —`);
-      }
-    }
-
-    lines.push('');
-    lines.push(
-      '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.'
-    );
-    lines.push(
-      '🧊 Failure to join on time will result in a **written warning**. :('
+  if (sessionType === 'training') {
+    row1.addComponents(
+      new ButtonBuilder()
+        .setCustomId('queue:training:cohost')
+        .setLabel('Co-Host')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('queue:training:overseer')
+        .setLabel('Overseer')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('queue:training:trainer')
+        .setLabel('Trainer')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('queue:training:spectator')
+        .setLabel('Spectator')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('queue:training:supervisor')
+        .setLabel('Supervisor')
+        .setStyle(ButtonStyle.Secondary),
     );
 
-    return lines.join('\n');
-  }
-
-  if (state.sessionType === 'training') {
-    const cohost = getSelected('cohost')[0] || null;
-    const overseer = getSelected('overseer')[0] || null;
-    const trainers = getSelected('trainer');
-    const supervisors = getSelected('supervisor');
-    const spectators = getSelected('spectator');
-
-    const lines = [];
-
-    lines.push('╔══════════════════════════════════════╗');
-    lines.push('                              ✅  SELECTED ATTENDEES ✅');
-    lines.push('╚══════════════════════════════════════╝');
-    lines.push('');
-    lines.push(`🧊 Host: ${hostLine}`);
-    lines.push(
-      `🧊 Co-Host: ${
-        cohost ? formatUserWithCount(cohost.userId, countFor(weeklyCounts, cohost.userId)) : '—'
-      }`
-    );
-    lines.push(
-      `🧊 Overseer: ${
-        overseer ? formatUserWithCount(overseer.userId, countFor(weeklyCounts, overseer.userId)) : '—'
-      }`
-    );
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-    lines.push('🔴  Trainers 🔴');
-
-    const maxTrainers = state.roles.trainer.max;
-    for (let i = 0; i < maxTrainers; i++) {
-      const entry = trainers[i];
-      if (entry) {
-        const c = countFor(weeklyCounts, entry.userId);
-        lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
-      } else {
-        lines.push(`${i + 1}. —`);
-      }
-    }
-
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-    lines.push('🟦  Supervisors 🟦');
-
-    const maxSup = state.roles.supervisor.max;
-    for (let i = 0; i < maxSup; i++) {
-      const entry = supervisors[i];
-      if (entry) {
-        const c = countFor(weeklyCounts, entry.userId);
-        lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
-      } else {
-        lines.push(`${i + 1}. —`);
-      }
-    }
-
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-    lines.push('⚪  Spectators ⚪');
-
-    const maxSpectators = state.roles.spectator.max;
-    for (let i = 0; i < maxSpectators; i++) {
-      const entry = spectators[i];
-      if (entry) {
-        const c = countFor(weeklyCounts, entry.userId);
-        lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
-      } else {
-        lines.push(`${i + 1}. —`);
-      }
-    }
-
-    lines.push('');
-    lines.push(
-      '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.'
-    );
-    lines.push(
-      '🧊 Failure to join on time will result in a **written warning**. :('
+    row2.addComponents(
+      new ButtonBuilder()
+        .setCustomId('queue:training:leave')
+        .setLabel('Leave Queue')
+        .setStyle(ButtonStyle.Danger),
     );
 
-    return lines.join('\n');
+    return [row1, row2];
   }
 
   // mass shift
-  const cohost = (state.roles.cohost && getSelected('cohost')[0]) || null;
-  const overseer = (state.roles.overseer && getSelected('overseer')[0]) || null;
-  const attendees = getSelected('attendee');
+  row1.addComponents(
+    new ButtonBuilder()
+      .setCustomId('queue:mass_shift:cohost')
+      .setLabel('Co-Host')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('queue:mass_shift:overseer')
+      .setLabel('Overseer')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('queue:mass_shift:attendee')
+      .setLabel('Attendee')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId('queue:mass_shift:leave')
+      .setLabel('Leave Queue')
+      .setStyle(ButtonStyle.Danger),
+  );
 
+  return [row1];
+}
+
+/**
+ * Ensure queue state shape exists for a card.
+ */
+function ensureQueueState(cardId, sessionType, meta) {
+  let state = queueState.get(cardId);
+  if (!state) {
+    state = {
+      cardId,
+      sessionType,
+      trelloUrl: meta.trelloUrl,
+      dueISO: meta.dueISO,
+      hostDiscordId: meta.hostDiscordId,
+      hostTagText: meta.hostTagText,
+      queueMessageId: meta.queueMessageId || null,
+      queueChannelId: meta.queueChannelId || null,
+      locked: false,
+      roles: {
+        cohost: [],
+        overseer: [],
+        interviewer: [],
+        spectator: [],
+        trainer: [],
+        attendee: [],
+        supervisor: [],
+      },
+    };
+    queueState.set(cardId, state);
+  } else {
+    state.sessionType = sessionType;
+    state.trelloUrl = meta.trelloUrl;
+    state.dueISO = meta.dueISO;
+    state.hostDiscordId = meta.hostDiscordId;
+    state.hostTagText = meta.hostTagText;
+    if (meta.queueMessageId) state.queueMessageId = meta.queueMessageId;
+    if (meta.queueChannelId) state.queueChannelId = meta.queueChannelId;
+  }
+  return state;
+}
+
+/**
+ * Handle /sessionqueue directly from the command.
+ * - Fetch Trello card
+ * - Detect session type
+ * - Post queue embed + buttons in correct channel
+ * - Ping role as a separate message under the embed
+ */
+async function handleManualSessionQueueCommand(interaction) {
+  const rawOption = interaction.options.getString('card', true);
+
+  const cardId = parseCardId(rawOption);
+  if (!cardId) {
+    await interaction.reply({
+      content: 'I could not understand that Trello card link or ID.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  // Load card details
+  const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
+    fields: 'name,desc,due,idLabels,shortUrl,url',
+  });
+
+  if (!cardRes.ok || !cardRes.data) {
+    await interaction.editReply(
+      'I could not open a queue for that Trello card.\n' +
+        '• Make sure the link is valid\n' +
+        '• The card has the correct session labels or [Interview]/[Training]/[Mass Shift] in the name\n' +
+        '• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
+    );
+    return;
+  }
+
+  const card = cardRes.data;
+  const sessionType = detectSessionTypeFromCard(card);
+  if (!sessionType) {
+    await interaction.editReply(
+      'I could not determine the session type from that card. Please ensure it has the right labels or [Interview]/[Training]/[Mass Shift] in the name.',
+    );
+    return;
+  }
+
+  const cfg = getSessionConfig(sessionType);
+  if (!cfg || !cfg.queueChannelId) {
+    console.warn('[QUEUE] Missing channel config for session type:', sessionType);
+    await interaction.editReply(
+      `I could not open a queue for that Trello card.\n` +
+        `• Make sure SESSION_QUEUE_CHANNEL_* env vars are set for ${sessionType}.`,
+    );
+    return;
+  }
+
+  const queueChannel = await interaction.client.channels.fetch(cfg.queueChannelId).catch(() => null);
+  if (!queueChannel || !queueChannel.isTextBased()) {
+    await interaction.editReply('The configured queue channel is invalid or not text-based.');
+    return;
+  }
+
+  const hostInfo = parseHostFromCard(card, interaction.user);
+  const hostMention = hostInfo.hostDiscordId
+    ? `<@${hostInfo.hostDiscordId}>`
+    : hostInfo.hostTagText;
+
+  const trelloUrl = card.shortUrl || card.url || 'Unknown';
+  const dueISO = card.due || null;
+  const dueMs = dueISO ? new Date(dueISO).getTime() : null;
+  const unix = dueMs && !Number.isNaN(dueMs) ? Math.floor(dueMs / 1000) : null;
+
+  const description = buildQueueDescription({
+    sessionType,
+    prettyName: cfg.prettyName,
+    emoji: cfg.emoji,
+    hostMention,
+    unixTimestamp: unix,
+    trelloUrl,
+  });
+
+  const embed = new EmbedBuilder()
+    .setDescription(description)
+    .setColor(0x87cefa); // light-ish blue
+
+  const components = buildQueueButtons(sessionType);
+
+  const queueMessage = await queueChannel.send({
+    embeds: [embed],
+    components,
+  });
+
+  // Ping under the embed (real ping)
+  if (cfg.pingRoleId) {
+    await queueChannel.send(`<@&${cfg.pingRoleId}>`);
+  }
+
+  // Store state
+  ensureQueueState(cardId, sessionType, {
+    trelloUrl,
+    dueISO,
+    hostDiscordId: hostInfo.hostDiscordId,
+    hostTagText: hostInfo.hostTagText,
+    queueMessageId: queueMessage.id,
+    queueChannelId: queueChannel.id,
+  });
+
+  await interaction.editReply('✅ Session queue posted successfully.');
+}
+
+/**
+ * Handle queue button interactions.
+ * customId format: queue:<sessionType>:<roleKey>
+ */
+async function handleQueueButtonInteraction(interaction) {
+  const cid = interaction.customId || '';
+  if (!cid.startsWith('queue:')) return false;
+
+  const parts = cid.split(':');
+  // [ 'queue', sessionType, roleKey ]
+  if (parts.length < 3) return false;
+
+  const sessionType = parts[1];
+  const roleKey = parts[2];
+
+  // We don't know cardId from the button, but we DO know the message it was pressed on.
+  // Find matching state by queueMessageId.
+  const msg = interaction.message;
+  const state = Array.from(queueState.values()).find(
+    (s) => s.queueMessageId === msg.id,
+  );
+
+  if (!state) {
+    await interaction.reply({
+      content: 'This queue is closed or no longer active.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  if (state.locked) {
+    await interaction.reply({
+      content: 'This queue has been locked. Please contact the host or a corporate member.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  if (roleKey === 'leave') {
+    // Remove from all role arrays
+    let removed = false;
+    for (const key of Object.keys(state.roles)) {
+      const arr = state.roles[key];
+      const before = arr.length;
+      state.roles[key] = arr.filter((id) => id !== interaction.user.id);
+      if (state.roles[key].length !== before) removed = true;
+    }
+
+    await interaction.reply({
+      content: removed
+        ? 'You have been removed from the queue.'
+        : 'You are not currently in the queue.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const cfg = getSessionConfig(sessionType);
+  if (!cfg) {
+    await interaction.reply({
+      content: 'This queue is misconfigured. Please contact an administrator.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const slotCfg = cfg.slots[roleKey];
+  if (!slotCfg) {
+    await interaction.reply({
+      content: 'That queue role is not available for this session.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const arr = state.roles[roleKey] || [];
+  // Capacity check
+  if (typeof slotCfg.max === 'number' && arr.length >= slotCfg.max) {
+    await interaction.reply({
+      content: `The ${slotCfg.label} queue is already full.`,
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  // Remove from all roles first, then add to the chosen one in join order.
+  for (const key of Object.keys(state.roles)) {
+    state.roles[key] = state.roles[key].filter((id) => id !== interaction.user.id);
+  }
+  state.roles[roleKey].push(interaction.user.id);
+
+  await interaction.reply({
+    content: `You have been added to the **${slotCfg.label}** queue.`,
+    ephemeral: true,
+  });
+
+  return true;
+}
+
+/**
+ * Build attendees text for INTERVIEW sessions.
+ * Hyra counts are appended like "(1 session)".
+ */
+function buildInterviewAttendeesMessage({
+  hostMention,
+  hostSessions,
+  cohostMentions,
+  cohostCounts,
+  overseerMentions,
+  overseerCounts,
+  interviewerMentions,
+  interviewerCounts,
+  spectatorMentions,
+  spectatorCounts,
+}) {
   const lines = [];
 
   lines.push('╔══════════════════════════════════════╗');
   lines.push('                              ✅  SELECTED ATTENDEES ✅');
   lines.push('╚══════════════════════════════════════╝');
   lines.push('');
-  lines.push(`🧊 Host: ${hostLine}`);
+  lines.push(`🧊 Host: ${hostMention}${hostSessions !== null ? ` — ${hostSessions} session${hostSessions === 1 ? '' : 's'}` : ''}`);
   lines.push(
     `🧊 Co-Host: ${
-      cohost ? formatUserWithCount(cohost.userId, countFor(weeklyCounts, cohost.userId)) : '—'
-    }`
+      cohostMentions[0]
+        ? `${cohostMentions[0]} — ${cohostCounts[0]} session${cohostCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
   );
   lines.push(
     `🧊 Overseer: ${
-      overseer ? formatUserWithCount(overseer.userId, countFor(weeklyCounts, overseer.userId)) : '—'
-    }`
+      overseerMentions[0]
+        ? `${overseerMentions[0]} — ${overseerCounts[0]} session${overseerCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
+  );
+  lines.push('');
+  lines.push('────────────');
+  lines.push('');
+  lines.push('🟡  Interviewers 🟡');
+
+  for (let i = 0; i < 12; i++) {
+    if (interviewerMentions[i]) {
+      const sCount = interviewerCounts[i];
+      lines.push(
+        `${i + 1}. ${interviewerMentions[i]} — ${sCount} session${
+          sCount === 1 ? '' : 's'
+        }`,
+      );
+    } else {
+      lines.push(`${i + 1}.`);
+    }
+  }
+
+  lines.push('');
+  lines.push('────────────');
+  lines.push('');
+  lines.push('⚪  Spectators ⚪');
+
+  for (let i = 0; i < 4; i++) {
+    if (spectatorMentions[i]) {
+      const sCount = spectatorCounts[i];
+      lines.push(
+        `${i + 1}. ${spectatorMentions[i]} — ${sCount} session${
+          sCount === 1 ? '' : 's'
+        }`,
+      );
+    } else {
+      lines.push(`${i + 1}.`);
+    }
+  }
+
+  lines.push('');
+  lines.push(
+    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+  );
+  lines.push(
+    '🧊 Failure to join on time will result in a **written warning**. :(',
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Build attendees text for TRAINING sessions.
+ * (Trainer + Spectator; supervisor queue exists but not shown separately for now)
+ */
+function buildTrainingAttendeesMessage({
+  hostMention,
+  hostSessions,
+  cohostMentions,
+  cohostCounts,
+  overseerMentions,
+  overseerCounts,
+  trainerMentions,
+  trainerCounts,
+  spectatorMentions,
+  spectatorCounts,
+}) {
+  const lines = [];
+
+  lines.push('╔══════════════════════════════════════╗');
+  lines.push('                              ✅  SELECTED ATTENDEES ✅');
+  lines.push('╚══════════════════════════════════════╝');
+  lines.push('');
+  lines.push(`🧊 Host: ${hostMention}${hostSessions !== null ? ` — ${hostSessions} session${hostSessions === 1 ? '' : 's'}` : ''}`);
+  lines.push(
+    `🧊 Co-Host: ${
+      cohostMentions[0]
+        ? `${cohostMentions[0]} — ${cohostCounts[0]} session${cohostCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
+  );
+  lines.push(
+    `🧊 Overseer: ${
+      overseerMentions[0]
+        ? `${overseerMentions[0]} — ${overseerCounts[0]} session${overseerCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
+  );
+  lines.push('');
+  lines.push('────────────');
+  lines.push('');
+  lines.push('🔴  Trainers 🔴 ');
+
+  for (let i = 0; i < 8; i++) {
+    if (trainerMentions[i]) {
+      const sCount = trainerCounts[i];
+      lines.push(
+        `${i + 1}. ${trainerMentions[i]} — ${sCount} session${
+          sCount === 1 ? '' : 's'
+        }`,
+      );
+    } else {
+      lines.push(`${i + 1}.`);
+    }
+  }
+
+  lines.push('');
+  lines.push('────────────');
+  lines.push('');
+  lines.push('⚪  Spectators ⚪');
+
+  for (let i = 0; i < 4; i++) {
+    if (spectatorMentions[i]) {
+      const sCount = spectatorCounts[i];
+      lines.push(
+        `${i + 1}. ${spectatorMentions[i]} — ${sCount} session${
+          sCount === 1 ? '' : 's'
+        }`,
+      );
+    } else {
+      lines.push(`${i + 1}.`);
+    }
+  }
+
+  lines.push('');
+  lines.push(
+    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+  );
+  lines.push(
+    '🧊 Failure to join on time will result in a **written warning**. :(',
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Build attendees text for MASS SHIFT sessions.
+ */
+function buildMassShiftAttendeesMessage({
+  hostMention,
+  hostSessions,
+  cohostMentions,
+  cohostCounts,
+  overseerMentions,
+  overseerCounts,
+  attendeeMentions,
+  attendeeCounts,
+}) {
+  const lines = [];
+
+  lines.push('╔══════════════════════════════════════╗');
+  lines.push('                              ✅  SELECTED ATTENDEES ✅');
+  lines.push('╚══════════════════════════════════════╝');
+  lines.push('');
+  lines.push(`🧊 Host: ${hostMention}${hostSessions !== null ? ` — ${hostSessions} session${hostSessions === 1 ? '' : 's'}` : ''}`);
+  lines.push(
+    `🧊 Co-Host: ${
+      cohostMentions[0]
+        ? `${cohostMentions[0]} — ${cohostCounts[0]} session${cohostCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
+  );
+  lines.push(
+    `🧊 Overseer: ${
+      overseerMentions[0]
+        ? `${overseerMentions[0]} — ${overseerCounts[0]} session${overseerCounts[0] === 1 ? '' : 's'}`
+        : 'None'
+    }`,
   );
   lines.push('');
   lines.push('────────────');
   lines.push('');
   lines.push('🟣  Attendees  🟣');
 
-  const maxAttendees = state.roles.attendee.max;
-  for (let i = 0; i < maxAttendees; i++) {
-    const entry = attendees[i];
-    if (entry) {
-      const c = countFor(weeklyCounts, entry.userId);
-      lines.push(`${i + 1}. ${formatUserWithCount(entry.userId, c)}`);
+  for (let i = 0; i < 15; i++) {
+    if (attendeeMentions[i]) {
+      const sCount = attendeeCounts[i];
+      lines.push(
+        `${i + 1}. ${attendeeMentions[i]} — ${sCount} session${
+          sCount === 1 ? '' : 's'
+        }`,
+      );
     } else {
-      lines.push(`${i + 1}. —`);
+      lines.push(`${i + 1}.`);
     }
   }
 
   lines.push('');
   lines.push(
-    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.'
+    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
   );
   lines.push(
-    '🧊 Failure to join on time will result in a **written warning**. :('
+    '🧊 Failure to join on time will result in a **written warning**. :(',
   );
 
   return lines.join('\n');
 }
 
-async function finalizeAttendeesForCard({ client, rawCardInput }) {
-  const cardShortId = extractCardShortId(rawCardInput);
-  if (!cardShortId) {
-    console.warn('[QUEUE] Could not parse Trello card id from:', rawCardInput);
-    return false;
-  }
-
-  const state = queues.get(cardShortId);
-  if (!state) {
-    console.warn('[QUEUE] No active queue for card', cardShortId);
-    return false;
-  }
-
-  if (state.isClosed) {
-    console.warn('[QUEUE] Queue already closed for card', cardShortId);
-    return false;
-  }
-
-  state.isClosed = true;
-
-  // Disable buttons visually (optional, but nice UX)
-  try {
-    const channel = await client.channels.fetch(state.queueMessageChannelId);
-    const message = await channel.messages.fetch(state.queueMessageId);
-
-    const disabledComponents = message.components.map(row => {
-      const newRow = new ActionRowBuilder();
-      newRow.addComponents(
-        row.components.map(comp =>
-          ButtonBuilder.from(comp).setDisabled(true)
-        )
-      );
-      return newRow;
+/**
+ * Helper: sort an array of user IDs by Hyra sessions (fewest first),
+ * breaking ties by join order.
+ */
+function sortByHyra(users, hyraMap) {
+  return users
+    .map((id, index) => ({
+      id,
+      index,
+      sessions: hyraMap.get(String(id)) ?? 0,
+    }))
+    .sort((a, b) => {
+      if (a.sessions !== b.sessions) return a.sessions - b.sessions;
+      return a.index - b.index;
     });
+}
 
-    await message.edit({ components: disabledComponents });
-  } catch (err) {
-    console.warn('[QUEUE] Failed to disable buttons for card', cardShortId, err);
+/**
+ * Handle /sessionattendees:
+ * - Uses the current queue state
+ * - Pulls Hyra weekly session counts
+ * - Posts a plain text attendees message in the right channel
+ */
+async function handleManualSessionAttendeesCommand(interaction) {
+  const rawOption = interaction.options.getString('card', true);
+  const cardId = parseCardId(rawOption);
+
+  if (!cardId) {
+    await interaction.reply({
+      content: 'I could not understand that Trello card link or ID.',
+      ephemeral: true,
+    });
+    return;
   }
 
-  const attendeesChannelId = state.attendeesChannelId || state.queueChannelId;
-  const attendeesChannel = await client.channels.fetch(attendeesChannelId).catch(() => null);
-  if (!attendeesChannel) {
-    console.error('[QUEUE] Could not fetch attendees channel', attendeesChannelId);
-    return false;
+  await interaction.deferReply({ ephemeral: true });
+
+  const state = queueState.get(cardId);
+  if (!state) {
+    await interaction.editReply(
+      'There is no active queue stored for that card. Please run `/sessionqueue` first and let staff join the queue.',
+    );
+    return;
   }
 
-  const weeklyCounts = await getWeeklySessionCounts();
-  const content = buildAttendeesMessage(state, weeklyCounts);
+  const cfg = getSessionConfig(state.sessionType);
+  if (!cfg) {
+    await interaction.editReply(
+      'This session type is not configured correctly for attendees.',
+    );
+    return;
+  }
+
+  const attendeesChannelId =
+    cfg.attendeesChannelId || cfg.queueChannelId || interaction.channelId;
+
+  const attendeesChannel = await interaction.client.channels
+    .fetch(attendeesChannelId)
+    .catch(() => null);
+
+  if (!attendeesChannel || !attendeesChannel.isTextBased()) {
+    await interaction.editReply('The attendees channel is invalid or not text-based.');
+    return;
+  }
+
+  // Get Hyra map
+  const hyraMap = await getWeeklySessionCounts();
+
+  const hostMention = state.hostDiscordId
+    ? `<@${state.hostDiscordId}>`
+    : state.hostTagText || 'Host';
+
+  const hostSessions =
+    state.hostDiscordId != null
+      ? hyraMap.get(String(state.hostDiscordId)) ?? 0
+      : null;
+
+  // Pick from queues with Hyra priority
+  function pickRole(roleKey, max) {
+    const arr = state.roles[roleKey] || [];
+    if (!arr.length) return { mentions: [], counts: [] };
+
+    const sorted = sortByHyra(arr, hyraMap).slice(0, max);
+    const mentions = sorted.map((p) => `<@${p.id}>`);
+    const counts = sorted.map((p) => p.sessions);
+    return { mentions, counts };
+  }
+
+  let content = '';
+
+  if (state.sessionType === 'interview') {
+    const { mentions: cohostM, counts: cohostC } = pickRole('cohost', 1);
+    const { mentions: overseerM, counts: overseerC } = pickRole('overseer', 1);
+    const { mentions: interviewerM, counts: interviewerC } = pickRole(
+      'interviewer',
+      12,
+    );
+    const { mentions: spectatorM, counts: spectatorC } = pickRole('spectator', 4);
+
+    content = buildInterviewAttendeesMessage({
+      hostMention,
+      hostSessions,
+      cohostMentions: cohostM,
+      cohostCounts: cohostC,
+      overseerMentions: overseerM,
+      overseerCounts: overseerC,
+      interviewerMentions: interviewerM,
+      interviewerCounts: interviewerC,
+      spectatorMentions: spectatorM,
+      spectatorCounts: spectatorC,
+    });
+  } else if (state.sessionType === 'training') {
+    const { mentions: cohostM, counts: cohostC } = pickRole('cohost', 1);
+    const { mentions: overseerM, counts: overseerC } = pickRole('overseer', 1);
+    const { mentions: trainerM, counts: trainerC } = pickRole('trainer', 8);
+    const { mentions: spectatorM, counts: spectatorC } = pickRole('spectator', 4);
+
+    content = buildTrainingAttendeesMessage({
+      hostMention,
+      hostSessions,
+      cohostMentions: cohostM,
+      cohostCounts: cohostC,
+      overseerMentions: overseerM,
+      overseerCounts: overseerC,
+      trainerMentions: trainerM,
+      trainerCounts: trainerC,
+      spectatorMentions: spectatorM,
+      spectatorCounts: spectatorC,
+    });
+  } else if (state.sessionType === 'mass_shift') {
+    const { mentions: cohostM, counts: cohostC } = pickRole('cohost', 1);
+    const { mentions: overseerM, counts: overseerC } = pickRole('overseer', 1);
+    const { mentions: attendeeM, counts: attendeeC } = pickRole('attendee', 15);
+
+    content = buildMassShiftAttendeesMessage({
+      hostMention,
+      hostSessions,
+      cohostMentions: cohostM,
+      cohostCounts: cohostC,
+      overseerMentions: overseerM,
+      overseerCounts: overseerC,
+      attendeeMentions: attendeeM,
+      attendeeCounts: attendeeC,
+    });
+  } else {
+    await interaction.editReply(
+      'This session type is not supported for attendees yet.',
+    );
+    return;
+  }
+
+  // Lock the queue so no one can keep changing after attendees are posted.
+  state.locked = true;
 
   await attendeesChannel.send({ content });
 
-  console.log('[QUEUE] Posted attendees for card', cardShortId);
-  return true;
-}
-
-// ===== BUTTON HANDLER =====
-
-async function handleQueueButtonInteraction(interaction) {
-  const customId = interaction.customId;
-  if (!customId || !customId.startsWith('queue_')) return false;
-
-  const messageId = interaction.message.id;
-  const cardShortId = messageToCard.get(messageId);
-  if (!cardShortId) {
-    await interaction.reply({
-      content: 'This queue is no longer active or has expired.',
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  const state = queues.get(cardShortId);
-  if (!state) {
-    await interaction.reply({
-      content: 'This queue is no longer active or has expired.',
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  if (state.isClosed) {
-    await interaction.reply({
-      content: 'This queue has already been closed. Please check the attendees post.',
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  const roleKey = customIdToRoleKey(customId);
-  const userId = interaction.user.id;
-
-  // Leave queue
-  if (roleKey === 'leave') {
-    const hadAny = removeUserFromAllRoles(state, userId);
-    if (hadAny) {
-      await interaction.reply({
-        content: 'You have been removed from all queues for this session.',
-        ephemeral: true,
-      });
-    } else {
-      await interaction.reply({
-        content: 'You are not currently in any queue for this session.',
-        ephemeral: true,
-      });
-    }
-    return true;
-  }
-
-  const roleState = state.roles[roleKey];
-  if (!roleState) {
-    await interaction.reply({
-      content: 'That role is not available in this queue.',
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  // SINGLE ROLE ONLY: remove from other roles first
-  removeUserFromAllRoles(state, userId);
-
-  if (roleState.members.some(m => m.userId === userId)) {
-    await interaction.reply({
-      content: `You are already in the **${roleLabelFor(state.sessionType, roleKey)}** queue.`,
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  if (roleState.members.length >= roleState.max) {
-    await interaction.reply({
-      content: `The **${roleLabelFor(state.sessionType, roleKey)}** queue is already full.`,
-      ephemeral: true,
-    });
-    return true;
-  }
-
-  roleState.members.push({ userId, joinedAt: Date.now() });
-
-  await interaction.reply({
-    content: `You have been added to the **${roleLabelFor(state.sessionType, roleKey)}** queue.`,
-    ephemeral: true,
-  });
-
-  // DM is optional; ignore failures
-  try {
-    const dm = await interaction.user.createDM();
-    await dm.send(
-      `You have been added to the **${roleLabelFor(
-        state.sessionType,
-        roleKey
-      )}** queue.\nTrello Card: https://trello.com/c/${state.cardShortId}`
-    );
-  } catch {
-    // ignore
-  }
-
-  return true;
+  await interaction.editReply('✅ Attendees list posted.');
 }
 
 module.exports = {
+  handleManualSessionQueueCommand,
+  handleManualSessionAttendeesCommand,
   handleQueueButtonInteraction,
-  openQueueForCard,
-  finalizeAttendeesForCard,
 };

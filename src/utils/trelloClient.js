@@ -7,7 +7,6 @@ const {
   TRELLO_LIST_INTERVIEW_ID,
   TRELLO_LIST_TRAINING_ID,
   TRELLO_LIST_MASS_SHIFT_ID,
-  TRELLO_LIST_COMPLETED_ID,
   TRELLO_LABEL_SCHEDULED_ID,
   TRELLO_LABEL_INTERVIEW_ID,
   TRELLO_LABEL_TRAINING_ID,
@@ -155,10 +154,6 @@ async function createSessionCard({
 
 /**
  * Helper to describe how far from due time an action happened.
- * Returns a string like:
- *  - "13 minutes after scheduled time"
- *  - "5 minutes before scheduled time"
- *  - "exactly on time"
  */
 function describeTimeDiff(dueISO) {
   if (!dueISO) return '';
@@ -181,12 +176,6 @@ function describeTimeDiff(dueISO) {
 
 /**
  * Cancel a session card by Trello card ID or shortlink.
- * - REMOVE SCHEDULED label
- * - ADD CANCELED label
- * - Keep type labels
- * - Mark due as complete
- * - Move to COMPLETED list (top)
- * - Append minutes-from-due info to description
  */
 async function cancelSessionCard({ cardId, reason }) {
   if (!cardId) return false;
@@ -197,12 +186,7 @@ async function cancelSessionCard({ cardId, reason }) {
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error(
-      '[TRELLO] cancelSessionCard: failed to load card',
-      cardId,
-      cardRes.status,
-      cardRes.data,
-    );
+    console.error('[TRELLO] cancelSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
     return false;
   }
 
@@ -240,12 +224,7 @@ async function cancelSessionCard({ cardId, reason }) {
   });
 
   if (!res1.ok) {
-    console.error(
-      '[TRELLO] cancelSessionCard: failed to update card',
-      cardId,
-      res1.status,
-      res1.data,
-    );
+    console.error('[TRELLO] cancelSessionCard: failed to update card', cardId, res1.status, res1.data);
     return false;
   }
 
@@ -263,12 +242,6 @@ async function cancelSessionCard({ cardId, reason }) {
 
 /**
  * Mark a session card as completed.
- * - REMOVE SCHEDULED / CANCELED
- * - ADD COMPLETED
- * - Keep type labels
- * - Mark due as complete
- * - Move to COMPLETED list (top)
- * - Append minutes-from-due info to description
  */
 async function completeSessionCard({ cardId }) {
   if (!cardId) return false;
@@ -278,12 +251,7 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!cardRes.ok || !cardRes.data) {
-    console.error(
-      '[TRELLO] completeSessionCard: failed to load card',
-      cardId,
-      cardRes.status,
-      cardRes.data,
-    );
+    console.error('[TRELLO] completeSessionCard: failed to load card', cardId, cardRes.status, cardRes.data);
     return false;
   }
 
@@ -315,12 +283,7 @@ async function completeSessionCard({ cardId }) {
   });
 
   if (!res1.ok) {
-    console.error(
-      '[TRELLO] completeSessionCard: failed to update card',
-      cardId,
-      res1.status,
-      res1.data,
-    );
+    console.error('[TRELLO] completeSessionCard: failed to update card', cardId, res1.status, res1.data);
     return false;
   }
 
@@ -347,12 +310,7 @@ async function moveToCompletedList(cardId) {
   });
 
   if (!res.ok) {
-    console.error(
-      '[TRELLO] moveToCompletedList: failed',
-      cardId,
-      res.status,
-      res.data,
-    );
+    console.error('[TRELLO] moveToCompletedList: failed', cardId, res.status, res.data);
     return false;
   }
 
@@ -366,4 +324,12 @@ module.exports = {
   cancelSessionCard,
   completeSessionCard,
   moveToCompletedList,
+
+  // Export label IDs so the queue system can detect session type
+  TRELLO_LABEL_INTERVIEW_ID,
+  TRELLO_LABEL_TRAINING_ID,
+  TRELLO_LABEL_MASS_SHIFT_ID,
+  TRELLO_LABEL_SCHEDULED_ID,
+  TRELLO_LABEL_COMPLETED_ID,
+  TRELLO_LABEL_CANCELED_ID,
 };
