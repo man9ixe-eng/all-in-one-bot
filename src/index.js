@@ -8,25 +8,32 @@ const {
   GatewayIntentBits,
   Partials,
   Collection,
+  Events,
 } = require('discord.js');
 const fs = require('node:fs');
 const path = require('node:path');
+
 const { handleMessageAutomod } = require('./utils/automod');
 const { runSessionAnnouncementTick } = require('./utils/sessionAnnouncements');
+const { handleQueueButtonInteraction } = require('./utils/sessionQueueManager');
 
-// ===== HTTP SERVER FOR RENDER =====
-
+// ==========================
+// HTTP SERVER FOR RENDER
+// ==========================
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Glace bot is running.\n');
-}).listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Glace bot is running.\n');
+  })
+  .listen(PORT, () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+  });
 
-// ===== DISCORD CLIENT SETUP =====
-
+// ==========================
+// DISCORD CLIENT SETUP
+// ==========================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -43,17 +50,21 @@ const client = new Client({
   ],
 });
 
-// Command collection
 client.commands = new Collection();
 
-// ===== LOAD COMMANDS (src/commands/**) =====
-
+// ==========================
+// LOAD COMMANDS (src/commands/**)
+// ==========================
 const commandsPathRoot = path.join(__dirname, 'commands');
+
 if (fs.existsSync(commandsPathRoot)) {
   const commandFolders = fs.readdirSync(commandsPathRoot);
+
   for (const folder of commandFolders) {
     const commandsPath = path.join(commandsPathRoot, folder);
-    const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+    const commandFiles = fs
+      .readdirSync(commandsPath)
+      .filter(file => file.endsWith('.js'));
 
     for (const file of commandFiles) {
       const filePath = path.join(commandsPath, file);
@@ -63,101 +74,107 @@ if (fs.existsSync(commandsPathRoot)) {
         client.commands.set(command.data.name, command);
         console.log(`[COMMAND] Loaded /${command.data.name} from ${filePath}`);
       } else {
-        console.log(`[WARN] Command at ${filePath} is missing "data" or "execute". Skipping.`);
+        console.log(
+          `[WARN] Command at ${filePath} is missing "data" or "execute". Skipping.`,
+        );
       }
     }
   }
 }
 
-// ===== EVENTS =====
-
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// ==========================
+// READY EVENT
+// ==========================
+client.once(Events.ClientReady, c => {
+  console.log(`Logged in as ${c.user.tag}`);
 });
 
-  // Session announcements: 30 minutes before due
-  setInterval(async () => {
-    try {
-      console.log('[AUTO] Session announcement tick...');
-      await runSessionAnnouncementTick(client);
-    } catch (err) {
-      console.error('[AUTO] Session announcement error:', err);
-    }
-  }, 60 * 1000); // check every 1 minute
+// ==========================
+// SESSION ANNOUNCEMENT TICK
+// (30-min checks, runs every minute)
+// ==========================
+setInterval(async () => {
+  try {
+    console.log('[AUTO] Session announcement tick...');
+    await runSessionAnnouncementTick(client);
+  } catch (err) {
+    console.error('[AUTO] Session announcement error:', err);
+  }
+}, 60 * 1000); // every 1 minute
 
-
-// MessageCreate: automod + prefix ping
-client.on('messageCreate', async (message) => {
-  // Run automod first (bad words, spam, etc.)
+// ==========================
+// MESSAGE CREATE – AUTOMOD + OPTIONAL PREFIX
+// ==========================
+client.on(Events.MessageCreate, async message => {
+  // Run automod (bad words, spam, etc.)
   try {
     await handleMessageAutomod(message);
   } catch (err) {
     console.error('[AUTOMOD] Error while processing message:', err);
   }
 
-  // Simple prefix command (optional)
+  // Simple legacy prefix command
   if (message.author.bot) return;
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
 });
 
-// Slash commands with safe error handling
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = interaction.client.commands.get(interaction.commandName);
-
-  if (!command) {
-    console.error(`No command matching ${interaction.commandName} was found.`);
-    return;
-  }
-
+// ==========================
+// INTERACTIONS (BUTTONS + SLASH)
+// ==========================
+client.on(Events.InteractionCreate, async interaction => {
   try {
+    // 1) Buttons – queue system, etc.
+    if (interaction.isButton()) {
+      const handled = await handleQueueButtonInteraction(interaction);
+      if (handled) return; // our queue handler took care of it
+      // if not ours, fall through to slash commands below
+    }
+
+    // 2) Slash commands
+    if (!interaction.isChatInputCommand()) return;
+
+    const command = interaction.client.commands.get(interaction.commandName);
+    if (!command) return;
+
     await command.execute(interaction);
   } catch (error) {
-    console.error('Error while executing command:', error);
+    console.error('Error while executing interaction:', error);
 
-    // Try to send a generic error message, but DO NOT crash if this fails
     try {
-      if (typeof interaction.isRepliable === 'function' && !interaction.isRepliable()) {
-        return;
-      }
-
       const payload = {
-        content: 'There was an error while executing this command.',
-        ephemeral: true, // safe for now; deprecation warning only
+        content: 'There was an error while executing this interaction.',
+        ephemeral: true,
       };
 
-      if (interaction.replied || interaction.deferred) {
-        interaction.followUp(payload).catch(err => {
-          console.error('Failed to send follow-up error message:', err);
-        });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp(payload);
       } else {
-        interaction.reply(payload).catch(err => {
-          console.error('Failed to send error reply:', err);
-        });
+        await interaction.reply(payload);
       }
-    } catch (err) {
-      console.error('Failed while handling command error:', err);
+    } catch {
+      // ignore double-reply issues
     }
   }
 });
 
-// ===== GLOBAL ERROR HANDLERS =====
-
-client.on('error', (error) => {
+// ==========================
+// GLOBAL ERROR HANDLERS
+// ==========================
+client.on('error', error => {
   console.error('Discord client error:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason, _promise) => {
   console.error('Unhandled promise rejection:', reason);
 });
 
-// ===== LOGIN TO DISCORD =====
-
+// ==========================
+// LOGIN
+// ==========================
 client
   .login(process.env.DISCORD_TOKEN)
-  .catch((err) => {
+  .catch(err => {
     console.error('Failed to login to Discord:', err);
   });
