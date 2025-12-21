@@ -1,164 +1,157 @@
 // src/utils/hyraClient.js
 
-/**
- * Hyra integration (safe / defensive).
- *
- * This module is designed so your bot won't crash if:
- * - Hyra isn't configured yet
- * - The API path or response shape is slightly different
- *
- * If anything fails, we just return "0 sessions" for everyone,
- * and your queue falls back to join-order priority.
- */
-
-const HYRA_API_BASE = process.env.HYRA_API_BASE || 'https://api.hyra.io';
-const HYRA_API_TOKEN = process.env.HYRA_API_TOKEN || '';
-const HYRA_WORKSPACE_ID = process.env.HYRA_WORKSPACE_ID || '';
+const HYRA_API_KEY = process.env.HYRA_API_KEY;
+const HYRA_WORKSPACE_ID = process.env.HYRA_WORKSPACE_ID;
+const HYRA_BASE_URL = process.env.HYRA_BASE_URL || 'https://api.hyra.io';
 
 /**
- * Optional: you can override the staff dashboard path exactly
- * as documented in Hyra docs (Retrieve Staff Dashboard).
- *
- * Example (you must confirm in docs):
- *   /v1/workspaces/WORKSPACE_ID/staff/dashboard
+ * Low-level Hyra request helper.
+ * - Adds Authorization header
+ * - Adds x-workspace-id header
+ * - Supports query params and JSON body
  */
-const HYRA_DASHBOARD_PATH =
-  process.env.HYRA_DASHBOARD_PATH ||
-  (HYRA_WORKSPACE_ID
-    ? `/v1/workspaces/${HYRA_WORKSPACE_ID}/staff/dashboard`
-    : '');
-
-/**
- * Generic Hyra request helper.
- *
- * We keep this very defensive: logs errors and returns { ok: false }
- * rather than throwing, so your bot keeps running.
- */
-async function hyraRequest(path, method = 'GET', query = {}) {
-  if (!HYRA_API_TOKEN || !HYRA_DASHBOARD_PATH) {
-    console.warn(
-      '[HYRA] Missing HYRA_API_TOKEN or HYRA_WORKSPACE_ID/HYRA_DASHBOARD_PATH – Hyra integration is effectively disabled.'
-    );
+async function hyraRequest(path, method = 'GET', query = null, body = null) {
+  if (!HYRA_API_KEY) {
+    console.error('[HYRA] Missing HYRA_API_KEY env var.');
     return { ok: false, status: 0, data: null };
   }
 
-  try {
-    const url = new URL(path, HYRA_API_BASE);
-    Object.entries(query || {}).forEach(([k, v]) => {
+  const url = new URL(HYRA_BASE_URL + path);
+
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null) {
         url.searchParams.set(k, String(v));
       }
-    });
+    }
+  }
 
-    const res = await fetch(url.toString(), {
+  const headers = {
+    Authorization: `Bearer ${HYRA_API_KEY}`,
+    'Content-Type': 'application/json',
+  };
+
+  // Hyra’s newer API style uses x-workspace-id instead of workspace in URL
+  if (HYRA_WORKSPACE_ID) {
+    headers['x-workspace-id'] = HYRA_WORKSPACE_ID;
+  }
+
+  let res;
+  try {
+    res = await fetch(url, {
       method,
-      headers: {
-        'Authorization': `Bearer ${HYRA_API_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
     });
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      // non-JSON body; ignore
-    }
-
-    if (!res.ok) {
-      console.error('[HYRA] API error', res.status, data);
-      return { ok: false, status: res.status, data };
-    }
-
-    return { ok: true, status: res.status, data };
   } catch (err) {
     console.error('[HYRA] Network error', err);
     return { ok: false, status: 0, data: null };
   }
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    // non-JSON / empty body, ignore
+  }
+
+  if (!res.ok) {
+    console.error('[HYRA] API error', res.status, data);
+    return { ok: false, status: res.status, data };
+  }
+
+  return { ok: true, status: res.status, data };
 }
 
 /**
- * Try to map Hyra "staff dashboard" data into a simple:
- *   { [discordId: string]: numberOfSessionsThisWeek }
+ * Get weekly session counts per Discord user.
+ * Returns a map like:
+ *   { "525890709841117187": 12, "123456789012345678": 3, ... }
  *
- * IMPORTANT:
- * - This code makes some *educated guesses* about the response shape.
- * - If Hyra changes or your workspace is different, just adjust the mapping
- *   at the bottom of this function to match the actual JSON.
- *
- * If anything doesn't match, we log and fall back to 0 for everyone.
+ * This is what /sessionqueue uses to append
+ * " (X sessions this week)" next to names.
  */
-async function getWeeklySessionCounts(discordIds) {
-  const result = {};
-  for (const id of discordIds) {
-    result[id] = 0;
+async function getWeeklySessionCounts() {
+  if (!HYRA_API_KEY || !HYRA_WORKSPACE_ID) {
+    console.warn(
+      '[HYRA] HYRA_API_KEY or HYRA_WORKSPACE_ID not set; returning empty counts.'
+    );
+    return {};
   }
 
-  if (!HYRA_API_TOKEN || !HYRA_DASHBOARD_PATH) {
-    // Already logged in hyraRequest, but we log once more for clarity
-    console.warn('[HYRA] getWeeklySessionCounts: Hyra is not fully configured, returning 0 for all.');
-    return result;
-  }
-
-  const dashRes = await hyraRequest(HYRA_DASHBOARD_PATH, 'GET', {
-    // You may need to adjust query params based on docs:
-    // e.g., period=week, timeframe=week, etc.
+  // Primary (correct) path per current Hyra docs:
+  // GET /v1/staff/dashboard?period=week
+  let res = await hyraRequest('/v1/staff/dashboard', 'GET', {
     period: 'week',
   });
 
-  if (!dashRes.ok || !dashRes.data) {
-    console.error('[HYRA] getWeeklySessionCounts: failed to retrieve staff dashboard.');
-    return result;
-  }
-
-  const data = dashRes.data;
-
-  // Try a few common container keys
-  const staffArray =
-    (Array.isArray(data.staff) && data.staff) ||
-    (Array.isArray(data.members) && data.members) ||
-    (Array.isArray(data.users) && data.users) ||
-    null;
-
-  if (!staffArray) {
-    console.error(
-      '[HYRA] getWeeklySessionCounts: could not find "staff/members/users" array in response. Please check Hyra docs and adjust mapping.'
+  // Fallback to the older URL style only if we get a 404 on the new one
+  if (!res.ok && res.status === 404) {
+    res = await hyraRequest(
+      `/v1/workspaces/${HYRA_WORKSPACE_ID}/staff/dashboard`,
+      'GET',
+      { period: 'week' }
     );
-    return result;
   }
 
-  for (const member of staffArray) {
-    // Try to resolve a Discord ID from several likely fields
+  if (!res.ok || !res.data) {
+    console.error(
+      '[HYRA] getWeeklySessionCounts: failed to retrieve staff dashboard.'
+    );
+    return {};
+  }
+
+  const body = res.data;
+
+  // Try to be defensive about response shape
+  // Common patterns:
+  //  - { staff: [...] }
+  //  - { results: [...] }
+  //  - [ ... ]
+  const staffArray =
+    body.staff ||
+    body.results ||
+    (Array.isArray(body) ? body : []);
+
+  if (!Array.isArray(staffArray)) {
+    console.error(
+      '[HYRA] getWeeklySessionCounts: unexpected response shape; staffArray is not an array.'
+    );
+    return {};
+  }
+
+  const counts = {};
+
+  for (const entry of staffArray) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    // Try multiple places for Discord ID
     const discordId =
-      (member.discordId && String(member.discordId)) ||
-      (member.discord_id && String(member.discord_id)) ||
-      (member.user && member.user.discordId && String(member.user.discordId)) ||
-      (member.user && member.user.discord_id && String(member.user.discord_id)) ||
-      null;
+      entry.discordId ||
+      entry.discord_id ||
+      (entry.user && (entry.user.discordId || entry.user.discord_id));
 
-    if (!discordId || !discordIds.includes(discordId)) {
-      continue;
-    }
+    if (!discordId) continue;
 
-    // Try to resolve "sessions this week" from a few likely fields
-    let sessionsWeek = 0;
+    // Try multiple fields for "sessions this week"
+    const sessionsThisWeek =
+      entry.sessionsThisWeek ??
+      entry.sessions_this_week ??
+      entry.sessionCount ??
+      entry.sessions ??
+      entry.totalSessions ??
+      0;
 
-    if (typeof member.sessionsThisWeek === 'number') {
-      sessionsWeek = member.sessionsThisWeek;
-    } else if (typeof member.sessions_this_week === 'number') {
-      sessionsWeek = member.sessions_this_week;
-    } else if (member.sessions && typeof member.sessions.week === 'number') {
-      sessionsWeek = member.sessions.week;
-    } else if (member.activity && typeof member.activity.sessionsWeek === 'number') {
-      sessionsWeek = member.activity.sessionsWeek;
-    }
-
-    result[discordId] = sessionsWeek;
+    counts[String(discordId)] =
+      typeof sessionsThisWeek === 'number'
+        ? sessionsThisWeek
+        : Number(sessionsThisWeek) || 0;
   }
 
-  return result;
+  return counts;
 }
 
 module.exports = {
+  hyraRequest,
   getWeeklySessionCounts,
 };
