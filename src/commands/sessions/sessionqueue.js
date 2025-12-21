@@ -7,63 +7,75 @@ const { openQueueForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open a session queue for a Trello session card.')
+    .setDescription('Manually open a test queue for a Trello session card (temporary helper).')
     .setDMPermission(false)
     .addStringOption(option =>
       option
-        .setName('card_link')
-        .setDescription('Trello card link for the session.')
+        .setName('card')
+        .setDescription('Trello card link or ID.')
         .setRequired(true),
     ),
 
+  /**
+   * /sessionqueue – TEMP TEST COMMAND
+   * - Just calls openQueueForCard (stub) and always replies ephemerally
+   * - Tier 4+ only so random LRs can’t spam it
+   */
   async execute(interaction) {
+    // Permission gate
     if (!atLeastTier(interaction.member, 4)) {
       return interaction.reply({
-        content: 'You must be at least **Tier 4 (Management)** to open a session queue.',
+        content: 'You must be at least **Tier 4 (Management)** to use `/sessionqueue`.',
         ephemeral: true,
       });
     }
 
-    const cardLink = interaction.options.getString('card_link', true);
+    const cardRefRaw = interaction.options.getString('card', true);
+    const cardRef = cardRefRaw.trim();
 
-    await interaction.deferReply({ ephemeral: true });
-
-    const result = await openQueueForCard(interaction.client, cardLink);
-
-    if (!result.ok) {
-      let msg = 'I could not open a queue for that Trello card.';
-
-      switch (result.error) {
-        case 'INVALID_LINK':
-          msg = 'That does not look like a valid Trello card link. Please paste the full card URL.';
-          break;
-        case 'TRELLO_FETCH_FAILED':
-          msg = 'I could not load that Trello card from the API. Check your Trello config and card visibility.';
-          break;
-        case 'UNKNOWN_SESSION_TYPE':
-          msg = 'I could not detect the session type from that card. Make sure it is in the Interview, Training, or Mass Shift list.';
-          break;
-        case 'NO_DUE_DATE':
-        case 'INVALID_DUE':
-          msg = 'That Trello card has no valid due date set. Please add one first.';
-          break;
-        case 'NO_QUEUE_CHANNEL':
-          msg = 'No queue channel is configured for that session type in `sessionQueue.js`.';
-          break;
-        case 'QUEUE_ALREADY_EXISTS':
-          msg = 'A queue is already open for that session card.';
-          break;
-        case 'QUEUE_CHANNEL_UNUSABLE':
-          msg = 'The configured queue channel is not usable. Check the channel ID in `sessionQueue.js`.';
-          break;
-      }
-
-      return interaction.editReply({ content: msg });
+    if (!cardRef) {
+      return interaction.reply({
+        content: 'Please provide a valid Trello card link or ID.',
+        ephemeral: true,
+      });
     }
 
-    return interaction.editReply({
-      content:
-        '✅ Session queue has been posted.\nStaff can now join using the buttons on the queue message.',
-    });
+    // Make sure Discord sees *something* quickly
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      // This is the placeholder we defined in sessionQueueManager.js.
+      // It just logs and returns right now.
+      await openQueueForCard(interaction.client, cardRef, {
+        invokedBy: interaction.user.id,
+      });
+
+      await interaction.editReply(
+        '✅ `/sessionqueue` ran successfully (queue system is still in placeholder mode).',
+      );
+    } catch (err) {
+      console.error('[SESSIONQUEUE] Error in /sessionqueue:', err);
+
+      if (interaction.deferred || interaction.replied) {
+        // We already deferred, so we edit the reply instead of replying again.
+        try {
+          await interaction.editReply({
+            content: 'There was an error while running `/sessionqueue`.',
+          });
+        } catch {
+          // ignore
+        }
+      } else {
+        // Fallback (shouldn’t really happen, but just in case)
+        try {
+          await interaction.reply({
+            content: 'There was an error while running `/sessionqueue`.',
+            ephemeral: true,
+          });
+        } catch {
+          // ignore
+        }
+      }
+    }
   },
 };
