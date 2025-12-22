@@ -1,583 +1,746 @@
 // src/utils/sessionQueueManager.js
+// Session queue + attendees system (NO Hyra calls yet – pure Trello + Discord)
+
 const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
 } = require('discord.js');
-const { trelloRequest } = require('./trelloClient');
 
-// In-memory queue state
-// shortId -> {
-//   shortId,
-//   sessionType,
-//   trelloUrl,
-//   hostId,
-//   hostName,
-//   due,
-//   queueMessageId,
-//   channelId,
-//   createdAt,
-//   roles: { key: { label, max, queue: [userId, ...] } },
-//   closed
-// }
-const queueState = new Map();
+const TRELLO_KEY = process.env.TRELLO_KEY;
+const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+const TRELLO_API_BASE = 'https://api.trello.com/1';
 
-const QUEUE_CONFIG = {
-  interview: {
-    displayName: 'INTERVIEW',
-    channelEnv: 'SESSION_QUEUECHANNEL_INTERVIEW_ID',
-    pingRoleEnv: 'SESSION_QUEUE_PING_INTERVIEW_ROLE_ID',
-    roleLines: [
-      'ℹ️ Co-Host: Corporate Intern+',
-      'ℹ️ Overseer: Executive Manager+',
-      'ℹ️ Interviewer (12): Leadership Intern+',
-      'ℹ️ Spectator (4): Leadership Intern+',
-    ],
-    roleButtons: [
-      { key: 'cohost', label: 'Co-Host', max: 1 },
-      { key: 'overseer', label: 'Overseer', max: 1 },
-      { key: 'interviewer', label: 'Interviewer', max: 12 },
-      { key: 'spectator', label: 'Spectator', max: 4 },
-    ],
-    attendeesLayout: [
-      { type: 'top', key: 'cohost', label: 'Co-Host' },
-      { type: 'top', key: 'overseer', label: 'Overseer' },
-      { type: 'section', title: '🟡  Interviewers 🟡', key: 'interviewer' },
-      { type: 'section', title: '⚪  Spectators ⚪', key: 'spectator' },
-    ],
-  },
-  training: {
-    displayName: 'TRAINING',
-    channelEnv: 'SESSION_QUEUECHANNEL_TRAINING_ID',
-    pingRoleEnv: 'SESSION_QUEUE_PING_TRAINING_ROLE_ID',
-    roleLines: [
-      'ℹ️ Co-Host: Corporate Intern+',
-      'ℹ️ Overseer: Executive Manager+',
-      'ℹ️ Trainer (6): Leadership Intern+',
-      'ℹ️ Supervisor (4): Supervisor+',
-      'ℹ️ Spectator (4): Leadership Intern+',
-    ],
-    roleButtons: [
-      { key: 'cohost', label: 'Co-Host', max: 1 },
-      { key: 'overseer', label: 'Overseer', max: 1 },
-      { key: 'trainer', label: 'Trainer', max: 6 },
-      { key: 'supervisor', label: 'Supervisor', max: 4 },
-      { key: 'spectator', label: 'Spectator', max: 4 },
-    ],
-    attendeesLayout: [
-      { type: 'top', key: 'cohost', label: 'Co-Host' },
-      { type: 'top', key: 'overseer', label: 'Overseer' },
-      { type: 'section', title: '🟡  Trainers 🟡', key: 'trainer' },
-      { type: 'section', title: '🟣  Supervisors 🟣', key: 'supervisor' },
-      { type: 'section', title: '⚪  Spectators ⚪', key: 'spectator' },
-    ],
-  },
-  massshift: {
-    displayName: 'MASS SHIFT',
-    channelEnv: 'SESSION_QUEUECHANNEL_MASSSHIFT_ID',
-    pingRoleEnv: 'SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID',
-    roleLines: [
-      'ℹ️ Co-Host: Corporate Intern+',
-      'ℹ️ Overseer: Executive Manager+',
-      'ℹ️ Shift Leader (6): Leadership Intern+',
-    ],
-    roleButtons: [
-      { key: 'cohost', label: 'Co-Host', max: 2 },
-      { key: 'overseer', label: 'Overseer', max: 2 },
-      { key: 'shiftleader', label: 'Shift Leader', max: 6 },
-    ],
-    attendeesLayout: [
-      { type: 'top', key: 'cohost', label: 'Co-Host' },
-      { type: 'top', key: 'overseer', label: 'Overseer' },
-      { type: 'section', title: '🔹  Shift Leaders 🔹', key: 'shiftleader' },
-    ],
-  },
-};
+if (!TRELLO_KEY || !TRELLO_TOKEN) {
+  console.warn('[QUEUE] TRELLO_KEY or TRELLO_TOKEN is missing – /sessionqueue will fail.');
+}
 
-// ---------- helpers ----------
+// Queue channels
+const SESSION_QUEUECHANNEL_INTERVIEW_ID = process.env.SESSION_QUEUECHANNEL_INTERVIEW_ID;
+const SESSION_QUEUECHANNEL_MASSSHIFT_ID = process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID;
+const SESSION_QUEUECHANNEL_TRAINING_ID = process.env.SESSION_QUEUECHANNEL_TRAINING_ID;
 
-function extractCardShortId(raw) {
-  if (!raw) return null;
+// Ping roles
+const SESSION_QUEUE_PING_INTERVIEW_ROLE_ID = process.env.SESSION_QUEUE_PING_INTERVIEW_ROLE_ID;
+const SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID = process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID;
+const SESSION_QUEUE_PING_TRAINING_ROLE_ID = process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID;
 
-  const urlMatch = raw.match(/trello\.com\/c\/([a-zA-Z0-9]+)/);
+// In-memory queues: shortId -> queueState
+const activeQueues = new Map();
+
+/**
+ * Helper: parse Trello short link from a URL or raw ID.
+ */
+function extractShortId(input) {
+  if (!input) return null;
+
+  // Full Trello URL: https://trello.com/c/XXXXXXX/...
+  const urlMatch = input.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
   if (urlMatch) return urlMatch[1];
 
-  const shortMatch = raw.match(/^[a-zA-Z0-9]{8}$/);
-  if (shortMatch) return shortMatch[0];
+  // Just the short id (8+ chars)
+  const idMatch = input.match(/^[A-Za-z0-9]{8,}$/);
+  if (idMatch) return idMatch[0];
 
-  const parts = raw.split('/');
-  const last = parts[parts.length - 1];
-  return last.split('-')[0];
+  return null;
 }
 
+/**
+ * Minimal Trello GET wrapper just for cards.
+ */
 async function fetchCardInfo(shortId) {
-  try {
-    const params = {
-      fields: 'id,shortLink,shortUrl,url,name,desc,due,labels',
-      label_fields: 'name,color',
-    };
-    const card = await trelloRequest('GET', `/1/cards/${shortId}`, params);
-    return card;
-  } catch (err) {
-    console.error('[TRELLO] Could not fetch card info:', err);
-    return null;
+  if (!TRELLO_KEY || !TRELLO_TOKEN) {
+    throw new Error('Trello API key/token missing.');
   }
+
+  const url = new URL(`${TRELLO_API_BASE}/cards/${shortId}`);
+  url.searchParams.set('key', TRELLO_KEY);
+  url.searchParams.set('token', TRELLO_TOKEN);
+  url.searchParams.set('fields', 'name,desc,due,url,labels');
+  url.searchParams.set('label_fields', 'name,color');
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.error('[TRELLO] Card fetch failed', res.status, await res.text());
+    throw new Error(`Trello API error: ${res.status}`);
+  }
+
+  const card = await res.json();
+  return card;
 }
 
+/**
+ * Determine session type from card name or labels.
+ * Returns: 'interview' | 'training' | 'massshift' | null
+ */
 function detectSessionType(card) {
   const name = (card.name || '').toLowerCase();
-  const labels = (card.labels || []).map((l) => (l.name || '').toLowerCase());
+  const labels = Array.isArray(card.labels) ? card.labels : [];
 
-  if (name.includes('[interview]') || labels.includes('interview')) return 'interview';
-  if (name.includes('[training]') || labels.includes('training')) return 'training';
-  if (
-    name.includes('[mass shift]') ||
-    name.includes('[mass-shift]') ||
-    labels.includes('mass shift')
-  ) {
+  if (name.includes('[interview]')) return 'interview';
+  if (name.includes('[training]')) return 'training';
+  if (name.includes('[mass shift]') || name.includes('[massshift]') || name.includes('[ms]')) {
     return 'massshift';
+  }
+
+  if (labels.some(l => (l.name || '').toLowerCase().includes('interview'))) return 'interview';
+  if (labels.some(l => (l.name || '').toLowerCase().includes('training'))) return 'training';
+  if (labels.some(l => (l.name || '').toLowerCase().includes('mass shift'))) return 'massshift';
+
+  return null;
+}
+
+/**
+ * Parse host Discord ID from card description.
+ * Expected line: "Host: username (123456789012345678)"
+ */
+function parseHostIdFromDesc(desc) {
+  if (!desc) return null;
+  const match = desc.match(/Host:\s*.+\((\d{17,20})\)/i);
+  return match ? match[1] : null;
+}
+
+/**
+ * Format due date into local time string (America/Toronto).
+ */
+function formatLocalTime(due) {
+  if (!due) return 'Unknown time';
+  const date = new Date(due);
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Toronto',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Format "Starts in X minutes/hours".
+ */
+function formatRelativeTime(due) {
+  if (!due) return 'Unknown';
+  const now = Date.now();
+  const target = new Date(due).getTime();
+  const diffMs = target - now;
+
+  if (diffMs <= 0) return 'now';
+
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 60) {
+    return `in ${diffMin} minute${diffMin === 1 ? '' : 's'}`;
+  }
+
+  const hours = Math.floor(diffMin / 60);
+  const minutes = diffMin % 60;
+
+  if (minutes === 0) {
+    return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+
+  return `in ${hours} hour${hours === 1 ? '' : 's'} ${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+/**
+ * Config per session type – how many of each role.
+ */
+function getQueueRoleConfig(sessionType) {
+  if (sessionType === 'interview') {
+    return {
+      displayName: 'Interview',
+      roles: ['cohost', 'overseer', 'interviewer', 'spectator'],
+      maxSlots: {
+        cohost: 1,
+        overseer: 1,
+        interviewer: 12,
+        spectator: 4,
+      },
+      labels: {
+        cohost: 'Co-Host',
+        overseer: 'Overseer',
+        interviewer: 'Interviewer',
+        spectator: 'Spectator',
+      },
+    };
+  }
+
+  if (sessionType === 'training') {
+    return {
+      displayName: 'Training',
+      roles: ['cohost', 'overseer', 'supervisor', 'spectator'],
+      maxSlots: {
+        cohost: 1,
+        overseer: 1,
+        supervisor: 4,
+        spectator: 4,
+      },
+      labels: {
+        cohost: 'Co-Host',
+        overseer: 'Overseer',
+        supervisor: 'Supervisor',
+        spectator: 'Spectator',
+      },
+    };
+  }
+
+  if (sessionType === 'massshift') {
+    return {
+      displayName: 'Mass Shift',
+      roles: ['cohost', 'overseer', 'supervisor', 'spectator'],
+      maxSlots: {
+        cohost: 1,
+        overseer: 1,
+        supervisor: 8,
+        spectator: 8,
+      },
+      labels: {
+        cohost: 'Co-Host',
+        overseer: 'Overseer',
+        supervisor: 'Supervisor',
+        spectator: 'Spectator',
+      },
+    };
   }
 
   return null;
 }
 
-function parseHostFromCard(card) {
-  const desc = card.desc || '';
-  const idMatch = desc.match(/Host:\s*.+?\((\d{17,})\)/i);
-  const nameMatch = card.name.match(/-\s*([^\-]+)$/); // last " - Name"
+/**
+ * Queue embed builder.
+ */
+function buildQueueEmbed(queue) {
+  const cfg = getQueueRoleConfig(queue.sessionType);
+  const typeTitle = cfg ? cfg.displayName.toUpperCase() : 'SESSION';
+  const localTime = formatLocalTime(queue.due);
+  const relative = formatRelativeTime(queue.due);
 
-  return {
-    hostId: idMatch ? idMatch[1] : null,
-    hostName: nameMatch ? nameMatch[1].trim() : 'Unknown Host',
-  };
-}
+  const header =
+    '╔══════════════════════════════════════╗\n' +
+    `🟡 ${typeTitle} | ${queue.hostDisplayName} | ${localTime} 🟡\n` +
+    '╚══════════════════════════════════════╝';
 
-function formatTimeInfo(card) {
-  if (!card.due) {
-    return {
-      dueDate: null,
-      timeLabel: 'Time: TBA',
-      startsInText: 'Starts: Time TBA',
-    };
+  let rolesBlock = '💠 ROLES 💠\n' +
+    '----------------------------------------------------------------\n';
+
+  if (queue.sessionType === 'interview') {
+    rolesBlock +=
+      'ℹ️ Co-Host: Corporate Intern+\n' +
+      'ℹ️ Overseer: Executive Manager+\n' +
+      'ℹ️ Interviewer (12): Leadership Intern+\n' +
+      'ℹ️ Spectator (4): Leadership Intern+\n';
+  } else if (queue.sessionType === 'training') {
+    rolesBlock +=
+      'ℹ️ Co-Host: Corporate Intern+\n' +
+      'ℹ️ Overseer: Executive Manager+\n' +
+      'ℹ️ Supervisor (4): Leadership Intern+\n' +
+      'ℹ️ Spectator (4): Leadership Intern+\n';
+  } else if (queue.sessionType === 'massshift') {
+    rolesBlock +=
+      'ℹ️ Co-Host: Corporate Intern+\n' +
+      'ℹ️ Overseer: Executive Manager+\n' +
+      'ℹ️ Supervisor (8): Leadership Intern+\n' +
+      'ℹ️ Spectator (8): Leadership Intern+\n';
   }
 
-  const dueDate = new Date(card.due);
-  const now = new Date();
-  const diffMs = dueDate - now;
-  const diffMinutes = Math.round(diffMs / 60000);
+  const instructions =
+    '\n❓ HOW TO JOIN THE QUEUE ❓\n' +
+    '----------------------------------------------------------------\n' +
+    'Check the role list above — if your rank is allowed, press the role button you want.\n' +
+    'You’ll get a private message that says you were added to that role\'s queue.\n' +
+    'Do NOT join the game until the attendees post is made in the attendees channel.\n' +
+    '\n' +
+    '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓\n' +
+    '----------------------------------------------------------------\n' +
+    'Click the Leave Queue button once you have joined a role.\n' +
+    'After the attendees post is made, changes must be handled by the host/corporate manually.\n';
 
-  let startsInText;
-  if (diffMinutes <= 0) startsInText = 'Starts: now';
-  else if (diffMinutes === 1) startsInText = 'Starts: in 1 minute';
-  else startsInText = `Starts: in ${diffMinutes} minutes`;
+  const linksBlock =
+    '\n----------------------------------------------------------------\n' +
+    '╭─────── 💠 LINKS 💠 ───────────╮\n' +
+    `• Trello Card: ${queue.cardUrl}\n` +
+    '╰─────────────────────────────╯';
 
-  const timeLabel = `Time: ${dueDate.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-    timeZone: 'America/New_York',
-  })}`;
+  const description =
+    `${header}\n\n` +
+    `📌 Host: <@${queue.hostId}>\n` +
+    `📌 Starts: ${relative}\n` +
+    `📌 Time: ${localTime}\n\n` +
+    rolesBlock +
+    '\n' +
+    instructions +
+    linksBlock;
 
-  return { dueDate, timeLabel, startsInText };
+  return new EmbedBuilder()
+    .setDescription(description)
+    .setColor(0xf1c40f);
 }
 
-function buildQueueButtons(shortId, config) {
+/**
+ * Buttons (join/leave/close).
+ */
+function buildQueueComponents(queue) {
+  const cfg = getQueueRoleConfig(queue.sessionType);
+  const shortId = queue.shortId;
+
   const rows = [];
+
+  // First row: join role buttons (up to 3)
   const row1 = new ActionRowBuilder();
-  const row2 = new ActionRowBuilder();
+  let addedInRow1 = 0;
 
-  config.roleButtons.forEach((role, index) => {
-    const btn = new ButtonBuilder()
-      .setCustomId(`queue:${shortId}:join:${role.key}`)
-      .setLabel(role.label)
-      .setStyle(ButtonStyle.Primary);
+  for (const roleKey of cfg.roles) {
+    if (addedInRow1 >= 3) break;
+    const label = cfg.labels[roleKey] || roleKey;
+    row1.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`sessionQueue:join:${roleKey}:${shortId}`)
+        .setLabel(label)
+        .setStyle(ButtonStyle.Primary)
+    );
+    addedInRow1++;
+  }
 
-    if (index < 4) row1.addComponents(btn);
-    else row2.addComponents(btn);
-  });
+  if (addedInRow1 > 0) rows.push(row1);
 
-  const leaveBtn = new ButtonBuilder()
-    .setCustomId(`queue:${shortId}:leave`)
-    .setLabel('Leave Queue')
-    .setStyle(ButtonStyle.Danger);
+  // Second row (if more roles)
+  if (cfg.roles.length > addedInRow1) {
+    const row2 = new ActionRowBuilder();
+    for (const roleKey of cfg.roles.slice(addedInRow1)) {
+      const label = cfg.labels[roleKey] || roleKey;
+      row2.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`sessionQueue:join:${roleKey}:${shortId}`)
+          .setLabel(label)
+          .setStyle(ButtonStyle.Primary)
+      );
+    }
+    rows.push(row2);
+  }
 
-  if (row2.components.length < 5) row2.addComponents(leaveBtn);
-  else row1.addComponents(leaveBtn);
+  // Third row: leave + close
+  const controlRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`sessionQueue:leave:${shortId}`)
+      .setLabel('Leave Queue')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`sessionQueue:close:${shortId}`)
+      .setLabel('Close Queue & Post Attendees')
+      .setStyle(ButtonStyle.Danger)
+  );
 
-  if (row1.components.length) rows.push(row1);
-  if (row2.components.length) rows.push(row2);
+  rows.push(controlRow);
 
   return rows;
 }
 
-function ensureStateForCard(
-  shortId,
-  sessionType,
-  trelloUrl,
-  hostId,
-  hostName,
-  dueDate,
-  channelId,
-  config,
-) {
-  const state = {
-    shortId,
-    sessionType,
-    trelloUrl,
-    hostId,
-    hostName,
-    due: dueDate,
-    queueMessageId: null,
-    channelId,
-    createdAt: Date.now(),
-    roles: {},
-    closed: false,
-  };
+/**
+ * Build attendees text message (plain, not embed).
+ */
+function buildAttendeesMessage(queue) {
+  const cfg = getQueueRoleConfig(queue.sessionType);
+  const qRoles = queue.roles;
+  const header =
+    '╔══════════════════════════════════════╗\n' +
+    '                             ✅  SELECTED ATTENDEES ✅\n' +
+    '╚══════════════════════════════════════╝';
 
-  for (const role of config.roleButtons) {
-    state.roles[role.key] = {
-      label: role.label,
-      max: role.max,
-      queue: [],
+  let lines = [];
+  lines.push(header, '');
+  lines.push(`🧊 Host: <@${queue.hostId}>`);
+
+  const cohost = (qRoles.cohost && qRoles.cohost[0]) || null;
+  const overseer = (qRoles.overseer && qRoles.overseer[0]) || null;
+
+  lines.push(`🧊 Co-Host: ${cohost ? `<@${cohost}>` : 'None selected'}`);
+  lines.push(`🧊 Overseer: ${overseer ? `<@${overseer}>` : 'None selected'}`);
+  lines.push('', '────────────', '');
+
+  if (queue.sessionType === 'interview') {
+    // Interviewers + Spectators
+    const interviewers = qRoles.interviewer || [];
+    const spectators = qRoles.spectator || [];
+
+    lines.push('🟡  Interviewers 🟡');
+    const maxInterviewers = 12;
+    for (let i = 0; i < maxInterviewers; i++) {
+      const userId = interviewers[i];
+      lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
+    }
+
+    lines.push('', '────────────', '', '⚪  Spectators ⚪');
+    const maxSpectators = 4;
+    for (let i = 0; i < maxSpectators; i++) {
+      const userId = spectators[i];
+      lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
+    }
+  } else {
+    // Training / Mass shift variant
+    const supervisors = qRoles.supervisor || [];
+    const spectators = qRoles.spectator || [];
+
+    lines.push('🟡  Supervisors 🟡');
+    const maxSup = (getQueueRoleConfig(queue.sessionType).maxSlots.supervisor) || 4;
+    for (let i = 0; i < maxSup; i++) {
+      const userId = supervisors[i];
+      lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
+    }
+
+    lines.push('', '────────────', '', '⚪  Spectators ⚪');
+    const maxSpecs = (getQueueRoleConfig(queue.sessionType).maxSlots.spectator) || 4;
+    for (let i = 0; i < maxSpecs; i++) {
+      const userId = spectators[i];
+      lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
+    }
+  }
+
+  lines.push(
+    '',
+    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+    '🧊 Failure to join on time will result in a **written warning**. :('
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Get queue channel + ping role by session type.
+ */
+function getQueueChannelAndPing(sessionType) {
+  if (sessionType === 'interview') {
+    return {
+      channelId: SESSION_QUEUECHANNEL_INTERVIEW_ID,
+      pingRoleId: SESSION_QUEUE_PING_INTERVIEW_ROLE_ID,
     };
   }
-
-  queueState.set(shortId, state);
-  return state;
+  if (sessionType === 'training') {
+    return {
+      channelId: SESSION_QUEUECHANNEL_TRAINING_ID,
+      pingRoleId: SESSION_QUEUE_PING_TRAINING_ROLE_ID,
+    };
+  }
+  if (sessionType === 'massshift') {
+    return {
+      channelId: SESSION_QUEUECHANNEL_MASSSHIFT_ID,
+      pingRoleId: SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID,
+    };
+  }
+  return { channelId: null, pingRoleId: null };
 }
 
-// ---------- main: open queue ----------
+/**
+ * Open a queue for a Trello card (called by /sessionqueue).
+ */
+async function openQueueForCard(interaction, cardOptionRaw) {
+  try {
+    const cardOption = (cardOptionRaw || '').trim();
+    console.log('[QUEUE] Raw card option:', cardOption);
 
-async function openQueueForCard(client, rawCardInput) {
-  const shortId = extractCardShortId(rawCardInput);
-  if (!shortId) {
-    console.warn('[QUEUE] Could not parse Trello card id from:', rawCardInput);
-    return { ok: false, reason: 'invalid-card' };
+    const shortId = extractShortId(cardOption);
+    if (!shortId) {
+      await interaction.reply({
+        content:
+          'I could not open a queue for that Trello card.\n' +
+          '• Make sure the link is valid\n' +
+          '• The card has the correct session labels or [Interview], [Training], [Mass Shift] in the name\n' +
+          '• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const card = await fetchCardInfo(shortId);
+    const sessionType = detectSessionType(card);
+
+    if (!sessionType) {
+      console.warn('[QUEUE] Could not detect session type for card:', card && card.id);
+      await interaction.reply({
+        content: 'I could not detect the session type from that Trello card.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const { channelId, pingRoleId } = getQueueChannelAndPing(sessionType);
+    if (!channelId) {
+      console.warn('[QUEUE] Missing channel config for session type:', sessionType);
+      await interaction.reply({
+        content: `I could not open a queue for that Trello card.\n• Make sure SESSION_QUEUECHANNEL_* env vars are set for ${sessionType}.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const queueChannel = await interaction.client.channels.fetch(channelId);
+    if (!queueChannel || !queueChannel.isTextBased()) {
+      await interaction.reply({
+        content: 'The configured queue channel is invalid or not text-based.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const hostId = parseHostIdFromDesc(card.desc) || interaction.user.id;
+    const hostDisplayName = interaction.member?.displayName || interaction.user.username;
+
+    const cfg = getQueueRoleConfig(sessionType);
+    const queueState = {
+      shortId,
+      cardId: card.id,
+      cardUrl: card.url,
+      sessionType,
+      hostId,
+      hostDisplayName,
+      due: card.due,
+      roles: {},
+      maxSlots: cfg.maxSlots,
+      channelId,
+      messageId: null,
+    };
+
+    // Initialize roles arrays
+    for (const r of cfg.roles) {
+      queueState.roles[r] = [];
+    }
+
+    const embed = buildQueueEmbed(queueState);
+    const components = buildQueueComponents(queueState);
+
+    const message = await queueChannel.send({
+      content: pingRoleId ? `<@&${pingRoleId}>` : null,
+      embeds: [embed],
+      components,
+    });
+
+    queueState.messageId = message.id;
+    activeQueues.set(shortId, queueState);
+
+    console.log(
+      `[QUEUE] Opened queue for card ${shortId} in channel ${channelId}`
+    );
+
+    await interaction.reply({
+      content: '✅ Session queue has been posted.',
+      ephemeral: true,
+    });
+  } catch (err) {
+    console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', err);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'There was an error while opening the queue for that Trello card.',
+        ephemeral: true,
+      });
+    }
   }
-
-  console.log('[QUEUE] Raw card option:', rawCardInput);
-
-  const card = await fetchCardInfo(shortId);
-  if (!card) {
-    console.warn('[QUEUE] Could not fetch Trello card for shortId:', shortId);
-    return { ok: false, reason: 'trello-not-found' };
-  }
-
-  const sessionType = detectSessionType(card);
-  if (!sessionType || !QUEUE_CONFIG[sessionType]) {
-    console.warn('[QUEUE] Could not detect session type for card:', card.name);
-    return { ok: false, reason: 'unknown-session-type' };
-  }
-
-  const config = QUEUE_CONFIG[sessionType];
-  const channelId = process.env[config.channelEnv];
-
-  if (!channelId) {
-    console.warn('[QUEUE] Missing channel config for session type:', sessionType);
-    return { ok: false, reason: `missing-channel-${sessionType}` };
-  }
-
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) {
-    console.warn('[QUEUE] Channel not found or not text-based:', channelId);
-    return { ok: false, reason: 'invalid-channel' };
-  }
-
-  const { hostId, hostName } = parseHostFromCard(card);
-  const { dueDate, timeLabel, startsInText } = formatTimeInfo(card);
-  const hostTag = hostId ? `<@${hostId}>` : hostName;
-
-  const headerTop = '╔══════════════════════════════════════╗';
-  const headerMid = `🟡 ${config.displayName} | ${hostTag} | ${timeLabel.replace('Time: ', '')} 🟡`;
-  const headerBottom = '╚══════════════════════════════════════╝';
-
-  const descriptionLines = [
-    headerTop,
-    headerMid,
-    headerBottom,
-    '',
-    `📌 Host: ${hostTag}`,
-    `📌 ${startsInText}`,
-    `📌 ${timeLabel}`,
-    '',
-    '💠 ROLES 💠',
-    '----------------------------------------------------------------',
-    ...config.roleLines,
-    '',
-    '❓ HOW TO JOIN THE QUEUE ❓',
-    '----------------------------------------------------------------',
-    'Check the role list above — if your rank is allowed, press the role button you want.',
-    'You’ll get a private confirmation message when you are added.',
-    'Do NOT join the game until the attendees post is made in the attendees channel.',
-    '',
-    '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓',
-    '----------------------------------------------------------------',
-    'Click the Leave Queue button once you have joined a role.',
-    'After the attendees post is made, changes must be handled by the host/corporate manually.',
-    '',
-    '----------------------------------------------------------------',
-    '╭─────── 💠 LINKS 💠 ───────────╮',
-    `• Trello Card: ${card.shortUrl || card.url}`,
-    '╰─────────────────────────────╯',
-  ];
-
-  const embed = new EmbedBuilder()
-    .setColor(0xffd166)
-    .setDescription(descriptionLines.join('\n'));
-
-  const buttons = buildQueueButtons(shortId, config);
-
-  const pingRoleId = process.env[config.pingRoleEnv];
-  const content = pingRoleId ? `<@&${pingRoleId}>` : '';
-
-  const message = await channel.send({
-    content,
-    embeds: [embed],
-    components: buttons,
-  });
-
-  const state = ensureStateForCard(
-    shortId,
-    sessionType,
-    card.shortUrl || card.url,
-    hostId,
-    hostName,
-    dueDate,
-    channel.id,
-    config,
-  );
-  state.queueMessageId = message.id;
-
-  console.log(
-    `[QUEUE] Opened queue for card ${shortId} in channel ${channel.id}`,
-  );
-
-  return { ok: true, channelId: channel.id, shortId };
 }
 
-// ---------- button handler ----------
-
+/**
+ * Handle queue buttons (join/leave/close).
+ */
 async function handleQueueButtonInteraction(interaction) {
-  if (!interaction.customId.startsWith('queue:')) return;
+  try {
+    const customId = interaction.customId || '';
+    const parts = customId.split(':');
 
-  const parts = interaction.customId.split(':');
-  const shortId = parts[1];
-  const action = parts[2];
-  const roleKey = parts[3] || null;
-
-  const state = queueState.get(shortId);
-  if (!state || state.closed) {
-    await interaction.reply({
-      content: 'This queue is no longer active.',
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const userId = interaction.user.id;
-
-  if (action === 'leave') {
-    let removed = false;
-    for (const role of Object.values(state.roles)) {
-      const idx = role.queue.indexOf(userId);
-      if (idx !== -1) {
-        role.queue.splice(idx, 1);
-        removed = true;
-      }
-    }
-
-    await interaction.reply({
-      content: removed
-        ? 'You have been removed from the queue.'
-        : 'You were not in this queue.',
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (action === 'join') {
-    const role = state.roles[roleKey];
-    if (!role) {
-      await interaction.reply({
-        content: 'That role no longer exists for this queue.',
-        ephemeral: true,
-      });
+    if (parts[0] !== 'sessionQueue') {
+      // Not ours – ignore silently.
       return;
     }
 
-    let movedFrom = null;
-    for (const [key, r] of Object.entries(state.roles)) {
-      const idx = r.queue.indexOf(userId);
-      if (idx !== -1) {
-        if (key === roleKey) {
-          await interaction.reply({
-            content: `You are already queued as **${role.label}** for this session.`,
-            ephemeral: true,
-          });
-          return;
+    const action = parts[1];
+
+    // Acknowledge quickly so we don't hit "Unknown interaction"
+    await interaction.deferUpdate();
+
+    if (action === 'join') {
+      const roleKey = parts[2];
+      const shortId = parts[3];
+      const queue = activeQueues.get(shortId);
+      if (!queue) return;
+
+      const cfg = getQueueRoleConfig(queue.sessionType);
+      if (!cfg.roles.includes(roleKey)) return;
+
+      // Remove user from all roles first
+      for (const rk of Object.keys(queue.roles)) {
+        queue.roles[rk] = queue.roles[rk].filter(id => id !== interaction.user.id);
+      }
+
+      // Now add to chosen role if there is space
+      const current = queue.roles[roleKey] || [];
+      const max = queue.maxSlots[roleKey] || 0;
+
+      if (max > 0 && current.length >= max) {
+        // No more space – just DM them, we already deferredUpdate
+        try {
+          await interaction.user.send(
+            `The **${cfg.labels[roleKey]}** queue for that session is full.`
+          );
+        } catch {
+          // ignore DM failure
         }
-        r.queue.splice(idx, 1);
-        movedFrom = r.label;
+      } else {
+        queue.roles[roleKey].push(interaction.user.id);
+        try {
+          await interaction.user.send(
+            `You have been added to the **${cfg.labels[roleKey]}** queue for that session.`
+          );
+        } catch {
+          // ignore DM failure
+        }
       }
+
+      // Update original queue message
+      const channel = await interaction.client.channels.fetch(queue.channelId);
+      if (channel && channel.isTextBased()) {
+        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+        if (message) {
+          const embed = buildQueueEmbed(queue);
+          const components = buildQueueComponents(queue);
+          await message.edit({ embeds: [embed], components });
+        }
+      }
+
+      return;
     }
 
-    if (role.queue.length >= role.max) {
+    if (action === 'leave') {
+      const shortId = parts[2];
+      const queue = activeQueues.get(shortId);
+      if (!queue) return;
+
+      for (const rk of Object.keys(queue.roles)) {
+        queue.roles[rk] = queue.roles[rk].filter(id => id !== interaction.user.id);
+      }
+
+      try {
+        await interaction.user.send('You have been removed from the session queue.');
+      } catch {
+        // ignore
+      }
+
+      const channel = await interaction.client.channels.fetch(queue.channelId);
+      if (channel && channel.isTextBased()) {
+        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+        if (message) {
+          const embed = buildQueueEmbed(queue);
+          const components = buildQueueComponents(queue);
+          await message.edit({ embeds: [embed], components });
+        }
+      }
+
+      return;
+    }
+
+    if (action === 'close') {
+      const shortId = parts[2];
+      const queue = activeQueues.get(shortId);
+      if (!queue) return;
+
+      // Post attendees in same channel
+      const channel = await interaction.client.channels.fetch(queue.channelId);
+      if (channel && channel.isTextBased()) {
+        const attendeesText = buildAttendeesMessage(queue);
+        await channel.send({ content: attendeesText });
+      }
+
+      // Optionally disable buttons on the queue message
+      const channel = await interaction.client.channels.fetch(queue.channelId);
+      if (channel && channel.isTextBased()) {
+        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+        if (message) {
+          const embed = buildQueueEmbed(queue);
+          await message.edit({ embeds: [embed], components: [] });
+        }
+      }
+
+      activeQueues.delete(shortId);
+      return;
+    }
+  } catch (err) {
+    console.error('[QUEUE BUTTON] Error in handleQueueButtonInteraction:', err);
+  }
+}
+
+/**
+ * Manual attendees command – uses existing queue state if present.
+ */
+async function postAttendeesForCard(interaction, cardOptionRaw) {
+  try {
+    const cardOption = (cardOptionRaw || '').trim();
+    console.log('[SESSIONATTENDEES] Raw card option:', cardOption);
+
+    const shortId = extractShortId(cardOption);
+    if (!shortId) {
       await interaction.reply({
-        content: `The **${role.label}** queue is currently full.`,
+        content:
+          'I could not post attendees for that Trello card.\n' +
+          '• Make sure the link is valid',
         ephemeral: true,
       });
       return;
     }
 
-    role.queue.push(userId);
+    const queue = activeQueues.get(shortId);
 
-    let msg = `You have been added as **${role.label}** for this session.`;
-    if (movedFrom) msg += ` (You were moved from **${movedFrom}**.)`;
+    if (!queue) {
+      // We will still attempt to fetch card info & build a "blank" queue just so host + text works.
+      const card = await fetchCardInfo(shortId);
+      const sessionType = detectSessionType(card);
+      if (!sessionType) {
+        await interaction.reply({
+          content: 'I could not detect the session type from that Trello card.',
+          ephemeral: true,
+        });
+        return;
+      }
+      const cfg = getQueueRoleConfig(sessionType);
+
+      const hostId = parseHostIdFromDesc(card.desc) || interaction.user.id;
+      const blankQueue = {
+        shortId,
+        cardId: card.id,
+        cardUrl: card.url,
+        sessionType,
+        hostId,
+        hostDisplayName: interaction.member?.displayName || interaction.user.username,
+        due: card.due,
+        roles: {},
+        maxSlots: cfg.maxSlots,
+        channelId: interaction.channelId,
+        messageId: null,
+      };
+      for (const r of cfg.roles) blankQueue.roles[r] = [];
+
+      const attendeesText = buildAttendeesMessage(blankQueue);
+      await interaction.channel.send({ content: attendeesText });
+
+      await interaction.reply({
+        content: '✅ Posted attendees list (no saved queue, so all slots are blank).',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const attendeesText = buildAttendeesMessage(queue);
+    await interaction.channel.send({ content: attendeesText });
 
     await interaction.reply({
-      content: msg,
+      content: '✅ Posted attendees list for that session.',
       ephemeral: true,
     });
-    return;
-  }
-
-  await interaction.reply({
-    content: 'Unknown queue action.',
-    ephemeral: true,
-  });
-}
-
-// ---------- attendees post ----------
-
-// Hyra integration is disabled for now to keep this stable.
-async function getWeeklySessionCounts(userIds) {
-  const result = {};
-  for (const id of userIds) result[id] = null;
-  return result;
-}
-
-function formatSessionsSuffix(count) {
-  if (count == null) return '';
-  if (count === 1) return ' (1 session)';
-  return ` (${count} sessions)`;
-}
-
-async function postAttendeesForCard(client, rawCardInput) {
-  const shortId = extractCardShortId(rawCardInput);
-  if (!shortId) {
-    console.warn('[ATTENDEES] Could not parse Trello card id from:', rawCardInput);
-    return { ok: false, reason: 'invalid-card' };
-  }
-
-  const state = queueState.get(shortId);
-  if (!state) {
-    console.warn('[ATTENDEES] No queue found for card:', shortId);
-    return { ok: false, reason: 'no-queue' };
-  }
-
-  const config = QUEUE_CONFIG[state.sessionType];
-  if (!config) return { ok: false, reason: 'unknown-session-type' };
-
-  const channel = await client.channels.fetch(state.channelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) {
-    return { ok: false, reason: 'invalid-channel' };
-  }
-
-  const selected = {};
-  for (const roleCfg of config.roleButtons) {
-    const roleState = state.roles[roleCfg.key];
-    selected[roleCfg.key] = roleState
-      ? roleState.queue.slice(0, roleCfg.max)
-      : [];
-  }
-
-  const ids = new Set();
-  if (state.hostId) ids.add(state.hostId);
-  for (const list of Object.values(selected)) {
-    for (const id of list) ids.add(id);
-  }
-
-  const sessionCounts = await getWeeklySessionCounts([...ids]);
-
-  const lines = [];
-  lines.push('╔══════════════════════════════════════╗');
-  lines.push('                             ✅  SELECTED ATTENDEES ✅');
-  lines.push('╚══════════════════════════════════════╝');
-  lines.push('');
-
-  const hostTag = state.hostId ? `<@${state.hostId}>` : state.hostName;
-  const hostSessions = sessionCounts[state.hostId] ?? null;
-  lines.push(`🧊 Host: ${hostTag}${formatSessionsSuffix(hostSessions)}`);
-
-  for (const layout of config.attendeesLayout.filter((l) => l.type === 'top')) {
-    const roleCfg = config.roleButtons.find((r) => r.key === layout.key);
-    const userList = selected[layout.key] || [];
-    const userId = userList[0];
-    if (!roleCfg) continue;
-
-    if (!userId) {
-      lines.push(`🧊 ${layout.label}: None selected`);
-    } else {
-      const suffix = formatSessionsSuffix(sessionCounts[userId] ?? null);
-      lines.push(`🧊 ${layout.label}: <@${userId}>${suffix}`);
+  } catch (err) {
+    console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'There was an error while posting the attendees list.',
+        ephemeral: true,
+      });
     }
   }
-
-  lines.push('');
-  lines.push('────────────');
-  lines.push('');
-
-  for (const layout of config.attendeesLayout.filter((l) => l.type === 'section')) {
-    const roleCfg = config.roleButtons.find((r) => r.key === layout.key);
-    if (!roleCfg) continue;
-
-    lines.push(layout.title);
-    const list = selected[layout.key] || [];
-
-    let index = 1;
-    for (const userId of list) {
-      const suffix = formatSessionsSuffix(sessionCounts[userId] ?? null);
-      lines.push(`${index}. <@${userId}>${suffix}`);
-      index++;
-    }
-    for (; index <= roleCfg.max; index++) {
-      lines.push(`${index}.`);
-    }
-
-    lines.push('');
-    lines.push('────────────');
-    lines.push('');
-  }
-
-  lines.push(
-    '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
-  );
-  lines.push(
-    '🧊 Failure to join on time will result in a **written warning**. :(',
-  );
-
-  const content = lines.join('\n');
-
-  // IMPORTANT: no allowedMentions override here – Discord will ping normally,
-  // and we avoid the "allowed_mentions.* Only iterables may be used in a SetType" error.
-  await channel.send({ content });
-
-  state.closed = true;
-
-  console.log('[QUEUE] Posted attendees for card', shortId);
-
-  return { ok: true, channelId: channel.id, shortId };
-}
-
-async function closeQueueForCard(shortId) {
-  const state = queueState.get(shortId);
-  if (state) state.closed = true;
 }
 
 module.exports = {
-  handleQueueButtonInteraction,
   openQueueForCard,
+  handleQueueButtonInteraction,
   postAttendeesForCard,
-  closeQueueForCard,
 };
