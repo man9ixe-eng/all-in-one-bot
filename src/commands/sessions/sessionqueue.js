@@ -1,11 +1,12 @@
 // src/commands/sessions/sessionqueue.js
+
 const { SlashCommandBuilder } = require('discord.js');
 const { openQueueForCard } = require('../../utils/sessionQueueManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open the staff queue for a Trello session card.')
+    .setDescription('Open a queue for a session Trello card.')
     .addStringOption(option =>
       option
         .setName('card')
@@ -13,41 +14,17 @@ module.exports = {
         .setRequired(true)
     ),
 
+  /**
+   * /sessionqueue card:<trello link or id>
+   */
   async execute(interaction) {
-    try {
-      await interaction.deferReply({ ephemeral: true });
+    // Support multiple possible option names just in case old commands differ
+    const cardOption =
+      interaction.options.getString('card') ||
+      interaction.options.getString('link') ||
+      interaction.options.getString('trello') ||
+      interaction.options.getString('trello_card');
 
-      const cardInput = interaction.options.getString('card', true);
-
-      const result = await openQueueForCard(interaction, cardInput);
-
-      if (!result.success) {
-        await interaction.editReply({
-          content: `❌ ${result.error}`,
-        });
-        return;
-      }
-
-      const { cardName, queueChannelId } = result;
-      const channelMention = queueChannelId ? `<#${queueChannelId}>` : '`(unknown channel)`';
-
-      await interaction.editReply({
-        content: `✅ Opened queue for **${cardName}** in ${channelMention}`,
-      });
-    } catch (err) {
-      console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content:
-            '❌ There was an error while executing this command. Please try again or check the logs.',
-        });
-      } else {
-        await interaction.reply({
-          content:
-            '❌ There was an error while executing this command. Please try again or check the logs.',
-          ephemeral: true,
-        });
-      }
-    }
+    await openQueueForCard(interaction, cardOption);
   },
 };
