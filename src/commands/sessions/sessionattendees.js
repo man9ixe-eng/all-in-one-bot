@@ -1,4 +1,5 @@
 // src/commands/sessions/sessionattendees.js
+'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
 const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
@@ -6,7 +7,7 @@ const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionattendees')
-    .setDescription('Post the selected attendees list for a session.')
+    .setDescription('Post the selected attendees list for a session queue.')
     .addStringOption(option =>
       option
         .setName('card')
@@ -14,16 +15,18 @@ module.exports = {
         .setRequired(true)
     ),
 
-  /**
-   * /sessionattendees card:<trello link or id>
-   */
   async execute(interaction) {
-    const cardOption =
-      interaction.options.getString('card') ||
-      interaction.options.getString('link') ||
-      interaction.options.getString('trello') ||
-      interaction.options.getString('trello_card');
+    try {
+      await postAttendeesForCard(interaction);
+    } catch (err) {
+      console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
 
-    await postAttendeesForCard(interaction, cardOption);
-  },
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: 'There was an error while executing this interaction.',
+          ephemeral: true
+        }).catch(() => {});
+      }
+    }
+  }
 };

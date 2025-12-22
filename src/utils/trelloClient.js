@@ -1,380 +1,150 @@
 // src/utils/trelloClient.js
+'use strict';
 
-const {
-  TRELLO_KEY,
-  TRELLO_TOKEN,
-  TRELLO_BOARD_ID,
-  TRELLO_LIST_INTERVIEW_ID,
-  TRELLO_LIST_TRAINING_ID,
-  TRELLO_LIST_MASS_SHIFT_ID,
-  TRELLO_LIST_COMPLETED_ID,     // <- IMPORTANT: now imported
-  TRELLO_LABEL_SCHEDULED_ID,
-  TRELLO_LABEL_INTERVIEW_ID,
-  TRELLO_LABEL_TRAINING_ID,
-  TRELLO_LABEL_MASS_SHIFT_ID,
-  TRELLO_LABEL_COMPLETED_ID,
-  TRELLO_LABEL_CANCELED_ID,
-} = require('../config/trello');
+const TRELLO_API_BASE = 'https://api.trello.com/1';
+
+const TRELLO_KEY = process.env.TRELLO_KEY;
+const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+
+if (!TRELLO_KEY || !TRELLO_TOKEN) {
+  console.warn('[TRELLO] TRELLO_KEY or TRELLO_TOKEN is missing. Trello requests will fail.');
+}
 
 /**
- * Flexible Trello request helper.
- *
- * Supports BOTH:
- *   trelloRequest('/cards/XYZ', 'GET', { fields: 'name' })
- *   trelloRequest('/cards/XYZ', { fields: 'name' })   // method defaults to GET
+ * Low-level Trello request helper.
+ * method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+ * path: '/cards/xxxx'
+ * queryParams: { idList, name, ... }
+ * body: JSON body for some requests (optional)
  */
-async function trelloRequest(path, methodOrQuery, maybeQuery) {
+async function trelloRequest(method, path, queryParams = {}, body = null) {
   if (!TRELLO_KEY || !TRELLO_TOKEN) {
-    console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN');
-    return { ok: false, status: 0, data: null };
+    throw new Error('Trello API credentials missing (TRELLO_KEY/TRELLO_TOKEN).');
   }
 
-  // Normalise arguments
-  let method = 'GET';
-  let query = {};
-
-  if (typeof methodOrQuery === 'string') {
-    // trelloRequest(path, 'POST', { ... })
-    method = methodOrQuery;
-    if (maybeQuery && typeof maybeQuery === 'object') {
-      query = maybeQuery;
-    }
-  } else if (typeof methodOrQuery === 'object' && methodOrQuery !== null) {
-    // trelloRequest(path, { ... })
-    query = methodOrQuery;
-  } // else: use defaults (GET, {})
-
-  const url = new URL(`https://api.trello.com/1${path}`);
+  const url = new URL(TRELLO_API_BASE + path);
   url.searchParams.set('key', TRELLO_KEY);
   url.searchParams.set('token', TRELLO_TOKEN);
 
-  for (const [k, v] of Object.entries(query)) {
-    if (v !== undefined && v !== null) {
-      url.searchParams.set(k, String(v));
+  if (queryParams && typeof queryParams === 'object') {
+    for (const [k, v] of Object.entries(queryParams)) {
+      if (v !== undefined && v !== null) {
+        url.searchParams.set(k, String(v));
+      }
     }
   }
 
+  const options = {
+    method,
+    headers: {}
+  };
+
+  if (body) {
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+
+  const res = await fetch(url, options);
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    console.error('[TRELLO] API error', res.status, text || null);
+    throw new Error(`Trello API error ${res.status}`);
+  }
+
+  if (!text) return {};
   try {
-    const res = await fetch(url.toString(), { method: String(method).toUpperCase() });
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      // non-JSON, ignore
-    }
-
-    if (res.status !== 200 && res.status !== 201) {
-      console.error('[TRELLO] API error', res.status, data);
-      return { ok: false, status: res.status, data };
-    }
-
-    return { ok: true, status: res.status, data };
-  } catch (err) {
-    console.error('[TRELLO] Network error', err);
-    return { ok: false, status: 0, data: null };
-  }
-}
-
-function getListIdForSessionType(sessionType) {
-  switch (sessionType) {
-    case 'interview':
-      return TRELLO_LIST_INTERVIEW_ID;
-    case 'training':
-      return TRELLO_LIST_TRAINING_ID;
-    case 'mass_shift':
-      return TRELLO_LIST_MASS_SHIFT_ID;
-    default:
-      return null;
-  }
-}
-
-function getTypeLabelId(sessionType) {
-  switch (sessionType) {
-    case 'interview':
-      return TRELLO_LABEL_INTERVIEW_ID;
-    case 'training':
-      return TRELLO_LABEL_TRAINING_ID;
-    case 'mass_shift':
-      return TRELLO_LABEL_MASS_SHIFT_ID;
-    default:
-      return null;
+    return JSON.parse(text);
+  } catch {
+    return {};
   }
 }
 
 /**
  * Create a session card on Trello.
- *
- * Interview  → INTERVIEW + SCHEDULED labels
- * Training   → TRAINING  + SCHEDULED labels
- * Mass Shift → MASS SHIFT + SCHEDULED labels
+ * Accepts the same object your logs showed previously:
+ * { idList, name, desc, pos, due, idLabels }
  */
-async function createSessionCard({
-  sessionType,
-  title,
-  dueISO,
-  notes,
-  hostTag,
-  hostId,
-}) {
-  const listId = getListIdForSessionType(sessionType);
-  if (!listId) {
-    console.error('[TRELLO] Unknown or unconfigured session type:', sessionType);
-    return false;
-  }
-
-  const typeLabelId = getTypeLabelId(sessionType);
-  const labelIds = [typeLabelId, TRELLO_LABEL_SCHEDULED_ID].filter(Boolean);
-
-  const humanType =
-    sessionType === 'interview'
-      ? 'Interview'
-      : sessionType === 'training'
-      ? 'Training'
-      : 'Mass Shift';
-
-  const name = `[${humanType}] ${title}`;
-
-  const descLines = [
-    `Session Type: ${humanType}`,
-    `Host: ${hostTag} (${hostId})`,
-  ];
-
-  if (notes && notes.trim().length > 0) {
-    descLines.push(`Notes: ${notes}`);
-  }
-
-  const params = {
-    idList: listId,
-    name,
-    desc: descLines.join('\n'),
-    pos: 'bottom',
-    due: dueISO || null,
-  };
-
-  if (labelIds.length > 0) {
-    params.idLabels = labelIds.join(',');
-  }
-
+async function createSessionCard({ idList, name, desc, pos = 'bottom', due, idLabels }) {
+  const params = { idList, name, desc, pos, due, idLabels };
   console.log('[TRELLO] Creating card with params:', params);
 
-  const result = await trelloRequest('/cards', 'POST', params);
-
-  if (!result.ok) {
-    console.error('[TRELLO] Failed to create card:', result.status, result.data);
-    return false;
-  }
-
+  const card = await trelloRequest('POST', '/cards', params);
   console.log('[TRELLO] Created card:', {
-    id: result.data && result.data.id,
-    url: result.data && (result.data.shortUrl || result.data.url),
+    id: card.id,
+    url: card.shortUrl || card.url
   });
 
-  return true;
+  return card;
 }
 
 /**
- * Helper to describe how far from due time an action happened.
- * Returns a string like:
- *  - "13 minutes after scheduled time"
- *  - "5 minutes before scheduled time"
- *  - "exactly on time"
+ * Get a Trello card by short link or id.
  */
-function describeTimeDiff(dueISO) {
-  if (!dueISO) return '';
+async function getCardByShortId(shortId) {
+  const card = await trelloRequest('GET', `/cards/${shortId}`, {
+    fields: 'name,desc,due,shortLink,shortUrl,url,idList',
+    members: 'true',
+    member_fields: 'username,fullName',
+    labels: 'all'
+  });
 
-  const dueTime = new Date(dueISO).getTime();
-  if (Number.isNaN(dueTime)) return '';
-
-  const now = Date.now();
-  const diffMinutes = Math.round((now - dueTime) / 60000);
-
-  if (diffMinutes > 0) {
-    return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} after scheduled time`;
-  } else if (diffMinutes < 0) {
-    const m = Math.abs(diffMinutes);
-    return `${m} minute${m === 1 ? '' : 's'} before scheduled time`;
-  } else {
-    return 'exactly on time';
-  }
+  return card;
 }
 
 /**
- * Cancel a session card by Trello card ID or shortlink.
- * - REMOVE SCHEDULED / COMPLETED
- * - ADD CANCELED
- * - Keep type labels
- * - Mark due as complete
- * - Move to COMPLETED list (top) if configured
- * - Append minutes-from-due info to description
+ * Move a card to a target list.
  */
-async function cancelSessionCard({ cardId, reason }) {
-  if (!cardId) return false;
-
-  const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
-    fields: 'idLabels,desc,due',
-  });
-
-  if (!cardRes.ok || !cardRes.data) {
-    console.error(
-      '[TRELLO] cancelSessionCard: failed to load card',
-      cardId,
-      cardRes.status,
-      cardRes.data
-    );
-    return false;
+async function moveCardToList(shortIdOrId, targetListId, actionLabel) {
+  if (!targetListId) {
+    console.error('[TRELLO] Target list ID is missing for', actionLabel);
+    throw new Error('Target Trello list ID missing.');
   }
 
-  const card = cardRes.data;
-  const currentLabels = Array.isArray(card.idLabels) ? card.idLabels.slice() : [];
-
-  const labelSet = new Set(currentLabels);
-  if (TRELLO_LABEL_SCHEDULED_ID) labelSet.delete(TRELLO_LABEL_SCHEDULED_ID);
-  if (TRELLO_LABEL_COMPLETED_ID) labelSet.delete(TRELLO_LABEL_COMPLETED_ID);
-  if (TRELLO_LABEL_CANCELED_ID) labelSet.add(TRELLO_LABEL_CANCELED_ID);
-  const newLabels = Array.from(labelSet);
-
-  const timeDiffStr = describeTimeDiff(card.due);
-
-  const descLines = [];
-  if (card.desc && card.desc.trim().length > 0) {
-    descLines.push(card.desc.trim(), '');
-  }
-
-  descLines.push('❌ Session canceled.');
-  if (reason && reason.trim().length > 0) {
-    descLines.push(`Reason: ${reason.trim()}`);
-  }
-  if (timeDiffStr) {
-    descLines.push(`⏱️ Canceled ${timeDiffStr}.`);
-  }
-
-  const res1 = await trelloRequest(`/cards/${cardId}`, 'PUT', {
-    idLabels: newLabels.length > 0 ? newLabels.join(',') : undefined,
-    dueComplete: 'true',
-    desc: descLines.join('\n'),
-  });
-
-  if (!res1.ok) {
-    console.error(
-      '[TRELLO] cancelSessionCard: failed to update card',
-      cardId,
-      res1.status,
-      res1.data
-    );
-    return false;
-  }
-
-  // Move to Completed list if configured
-  if (TRELLO_LIST_COMPLETED_ID) {
-    await trelloRequest(`/cards/${cardId}`, 'PUT', {
-      idList: TRELLO_LIST_COMPLETED_ID,
-      pos: 'top',
-    });
-  }
-
-  console.log('[TRELLO] Canceled + moved card:', cardId);
-  return true;
+  const result = await trelloRequest('PUT', `/cards/${shortIdOrId}`, { idList: targetListId });
+  console.log(`[TRELLO] ${actionLabel} card: ${shortIdOrId}`);
+  return result;
 }
 
 /**
- * Mark a session card as completed.
- * - REMOVE SCHEDULED / CANCELED
- * - ADD COMPLETED
- * - Keep type labels
- * - Mark due as complete
- * - Move to COMPLETED list (top) if configured
- * - Append minutes-from-due info to description
+ * Cancel a session card: move it to the CANCELED list.
+ * Requires env: TRELLO_LIST_CANCELED_ID
  */
-async function completeSessionCard({ cardId }) {
-  if (!cardId) return false;
-
-  const cardRes = await trelloRequest(`/cards/${cardId}`, 'GET', {
-    fields: 'idLabels,desc,due',
-  });
-
-  if (!cardRes.ok || !cardRes.data) {
-    console.error(
-      '[TRELLO] completeSessionCard: failed to load card',
-      cardId,
-      cardRes.status,
-      cardRes.data
-    );
-    return false;
-  }
-
-  const card = cardRes.data;
-  const currentLabels = Array.isArray(card.idLabels) ? card.idLabels.slice() : [];
-
-  const labelSet = new Set(currentLabels);
-  if (TRELLO_LABEL_SCHEDULED_ID) labelSet.delete(TRELLO_LABEL_SCHEDULED_ID);
-  if (TRELLO_LABEL_CANCELED_ID) labelSet.delete(TRELLO_LABEL_CANCELED_ID);
-  if (TRELLO_LABEL_COMPLETED_ID) labelSet.add(TRELLO_LABEL_COMPLETED_ID);
-  const newLabels = Array.from(labelSet);
-
-  const timeDiffStr = describeTimeDiff(card.due);
-
-  const descLines = [];
-  if (card.desc && card.desc.trim().length > 0) {
-    descLines.push(card.desc.trim(), '');
-  }
-
-  descLines.push('✅ Session marked complete.');
-  if (timeDiffStr) {
-    descLines.push(`⏱️ Completed ${timeDiffStr}.`);
-  }
-
-  const res1 = await trelloRequest(`/cards/${cardId}`, 'PUT', {
-    idLabels: newLabels.length > 0 ? newLabels.join(',') : undefined,
-    dueComplete: 'true',
-    desc: descLines.join('\n'),
-  });
-
-  if (!res1.ok) {
-    console.error(
-      '[TRELLO] completeSessionCard: failed to update card',
-      cardId,
-      res1.status,
-      res1.data
-    );
-    return false;
-  }
-
-  if (TRELLO_LIST_COMPLETED_ID) {
-    await trelloRequest(`/cards/${cardId}`, 'PUT', {
-      idList: TRELLO_LIST_COMPLETED_ID,
-      pos: 'top',
-    });
-  }
-
-  console.log('[TRELLO] Marked card complete:', cardId);
-  return true;
+async function cancelSessionCard(shortIdOrId) {
+  const canceledListId = process.env.TRELLO_LIST_CANCELED_ID;
+  return moveCardToList(shortIdOrId, canceledListId, 'Canceled + moved');
 }
 
 /**
- * Simple helper to move a card directly to the Completed list (if configured).
+ * Complete a session card: move it to the COMPLETED list.
+ * Requires env: TRELLO_LIST_COMPLETED_ID
  */
-async function moveToCompletedList(cardId) {
-  if (!cardId || !TRELLO_LIST_COMPLETED_ID) return false;
+async function completeSessionCard(shortIdOrId) {
+  const completedListId = process.env.TRELLO_LIST_COMPLETED_ID;
+  return moveCardToList(shortIdOrId, completedListId, 'Completed + moved');
+}
 
-  const res = await trelloRequest(`/cards/${cardId}`, 'PUT', {
-    idList: TRELLO_LIST_COMPLETED_ID,
-    pos: 'top',
-  });
-
-  if (!res.ok) {
-    console.error('[TRELLO] moveToCompletedList: failed', cardId, res.status, res.data);
-    return false;
+/**
+ * Remove a session card: archive it (closed=true).
+ */
+async function removeSessionCard(shortIdOrId) {
+  if (!TRELLO_KEY || !TRELLO_TOKEN) {
+    throw new Error('Trello API credentials missing (TRELLO_KEY/TRELLO_TOKEN).');
   }
 
-  console.log('[TRELLO] Moved card to completed list:', cardId);
-  return true;
+  const result = await trelloRequest('PUT', `/cards/${shortIdOrId}`, {
+    closed: 'true'
+  });
+
+  console.log('[TRELLO] Archived card:', shortIdOrId);
+  return result;
 }
 
 module.exports = {
   trelloRequest,
   createSessionCard,
+  getCardByShortId,
   cancelSessionCard,
   completeSessionCard,
-  moveToCompletedList,
+  removeSessionCard
 };
