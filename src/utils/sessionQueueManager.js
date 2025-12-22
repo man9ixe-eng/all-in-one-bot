@@ -1,5 +1,5 @@
 // src/utils/sessionQueueManager.js
-// Session queue + attendees system (NO Hyra calls yet – pure Trello + Discord)
+// Session queue + attendees system (NO Hyra calls here – pure Trello + Discord)
 
 const {
   EmbedBuilder,
@@ -12,19 +12,22 @@ const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 const TRELLO_API_BASE = 'https://api.trello.com/1';
 
-if (!TRELLO_KEY || !TRELLO_TOKEN) {
-  console.warn('[QUEUE] TRELLO_KEY or TRELLO_TOKEN is missing – /sessionqueue will fail.');
-}
-
-// Queue channels
+// Queue channels (DO NOT RENAME – using your names)
 const SESSION_QUEUECHANNEL_INTERVIEW_ID = process.env.SESSION_QUEUECHANNEL_INTERVIEW_ID;
 const SESSION_QUEUECHANNEL_MASSSHIFT_ID = process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID;
 const SESSION_QUEUECHANNEL_TRAINING_ID = process.env.SESSION_QUEUECHANNEL_TRAINING_ID;
 
-// Ping roles
+// Ping roles (DO NOT RENAME – using your names)
 const SESSION_QUEUE_PING_INTERVIEW_ROLE_ID = process.env.SESSION_QUEUE_PING_INTERVIEW_ROLE_ID;
 const SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID = process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID;
 const SESSION_QUEUE_PING_TRAINING_ROLE_ID = process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID;
+
+// NEW: where to log final attendees when session is completed
+const SESSION_ATTENDEES_LOG_CHANNEL_ID = process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID;
+
+if (!TRELLO_KEY || !TRELLO_TOKEN) {
+  console.warn('[QUEUE] TRELLO_KEY or TRELLO_TOKEN is missing – /sessionqueue will fail.');
+}
 
 // In-memory queues: shortId -> queueState
 const activeQueues = new Map();
@@ -62,7 +65,8 @@ async function fetchCardInfo(shortId) {
 
   const res = await fetch(url);
   if (!res.ok) {
-    console.error('[TRELLO] Card fetch failed', res.status, await res.text());
+    const text = await res.text().catch(() => '');
+    console.error('[TRELLO] Card fetch failed', res.status, text);
     throw new Error(`Trello API error: ${res.status}`);
   }
 
@@ -245,7 +249,7 @@ function buildQueueEmbed(queue) {
     '\n❓ HOW TO JOIN THE QUEUE ❓\n' +
     '----------------------------------------------------------------\n' +
     'Check the role list above — if your rank is allowed, press the role button you want.\n' +
-    'You’ll get a private message that says you were added to that role\'s queue.\n' +
+    'You’ll get a private message in this channel that is only visible to you.\n' +
     'Do NOT join the game until the attendees post is made in the attendees channel.\n' +
     '\n' +
     '❓ HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL ❓\n' +
@@ -379,14 +383,14 @@ function buildAttendeesMessage(queue) {
     const spectators = qRoles.spectator || [];
 
     lines.push('🟡  Supervisors 🟡');
-    const maxSup = (cfg.maxSlots.supervisor) || 4;
+    const maxSup = cfg.maxSlots.supervisor || 4;
     for (let i = 0; i < maxSup; i++) {
       const userId = supervisors[i];
       lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
     }
 
     lines.push('', '────────────', '', '⚪  Spectators ⚪');
-    const maxSpecs = (cfg.maxSlots.spectator) || 4;
+    const maxSpecs = cfg.maxSlots.spectator || 4;
     for (let i = 0; i < maxSpecs; i++) {
       const userId = spectators[i];
       lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
@@ -495,6 +499,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
       maxSlots: cfg.maxSlots,
       channelId,
       messageId: null,
+      attendeesMessageId: null,
     };
 
     // Initialize roles arrays
@@ -511,6 +516,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
     };
 
     if (pingRoleId) {
+      // Ping outside embed
       messagePayload.content = `<@&${pingRoleId}>`;
     }
 
@@ -540,6 +546,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
 
 /**
  * Handle queue buttons (join/leave/close).
+ * Now uses EPHEMERAL replies instead of DMs.
  */
 async function handleQueueButtonInteraction(interaction) {
   try {
@@ -553,17 +560,23 @@ async function handleQueueButtonInteraction(interaction) {
 
     const action = parts[1];
 
-    // Acknowledge quickly so we don't hit "Unknown interaction"
-    await interaction.deferUpdate();
+    // Acknowledge quickly with an ephemeral defer so we can edit it
+    await interaction.deferReply({ ephemeral: true });
 
     if (action === 'join') {
       const roleKey = parts[2];
       const shortId = parts[3];
       const queue = activeQueues.get(shortId);
-      if (!queue) return;
+      if (!queue) {
+        await interaction.editReply('This queue is no longer active.');
+        return;
+      }
 
       const cfg = getQueueRoleConfig(queue.sessionType);
-      if (!cfg.roles.includes(roleKey)) return;
+      if (!cfg.roles.includes(roleKey)) {
+        await interaction.editReply('That role is not valid for this queue.');
+        return;
+      }
 
       // Remove user from all roles first
       for (const rk of Object.keys(queue.roles)) {
@@ -575,29 +588,20 @@ async function handleQueueButtonInteraction(interaction) {
       const max = queue.maxSlots[roleKey] || 0;
 
       if (max > 0 && current.length >= max) {
-        // No more space – just DM them, we already deferredUpdate
-        try {
-          await interaction.user.send(
-            `The **${cfg.labels[roleKey]}** queue for that session is full.`
-          );
-        } catch {
-          // ignore DM failure
-        }
+        await interaction.editReply(
+          `The **${cfg.labels[roleKey]}** queue is already full.`
+        );
       } else {
         queue.roles[roleKey].push(interaction.user.id);
-        try {
-          await interaction.user.send(
-            `You have been added to the **${cfg.labels[roleKey]}** queue for that session.`
-          );
-        } catch {
-          // ignore DM failure
-        }
+        await interaction.editReply(
+          `You have been added to the **${cfg.labels[roleKey]}** queue for this session.`
+        );
       }
 
       // Update original queue message
-      const channel = await interaction.client.channels.fetch(queue.channelId);
-      if (channel && channel.isTextBased()) {
-        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+      const queueChannel = await interaction.client.channels.fetch(queue.channelId);
+      if (queueChannel && queueChannel.isTextBased()) {
+        const message = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
         if (message) {
           const embed = buildQueueEmbed(queue);
           const components = buildQueueComponents(queue);
@@ -611,21 +615,22 @@ async function handleQueueButtonInteraction(interaction) {
     if (action === 'leave') {
       const shortId = parts[2];
       const queue = activeQueues.get(shortId);
-      if (!queue) return;
+      if (!queue) {
+        await interaction.editReply('This queue is no longer active.');
+        return;
+      }
 
       for (const rk of Object.keys(queue.roles)) {
         queue.roles[rk] = queue.roles[rk].filter(id => id !== interaction.user.id);
       }
 
-      try {
-        await interaction.user.send('You have been removed from the session queue.');
-      } catch {
-        // ignore
-      }
+      await interaction.editReply(
+        'You have been removed from the session queue.'
+      );
 
-      const channel = await interaction.client.channels.fetch(queue.channelId);
-      if (channel && channel.isTextBased()) {
-        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+      const queueChannel = await interaction.client.channels.fetch(queue.channelId);
+      if (queueChannel && queueChannel.isTextBased()) {
+        const message = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
         if (message) {
           const embed = buildQueueEmbed(queue);
           const components = buildQueueComponents(queue);
@@ -639,27 +644,42 @@ async function handleQueueButtonInteraction(interaction) {
     if (action === 'close') {
       const shortId = parts[2];
       const queue = activeQueues.get(shortId);
-      if (!queue) return;
+      if (!queue) {
+        await interaction.editReply('This queue is no longer active.');
+        return;
+      }
 
-      const channel = await interaction.client.channels.fetch(queue.channelId);
-      if (channel && channel.isTextBased()) {
+      const queueChannel = await interaction.client.channels.fetch(queue.channelId);
+      if (queueChannel && queueChannel.isTextBased()) {
         // Post attendees
         const attendeesText = buildAttendeesMessage(queue);
-        await channel.send({ content: attendeesText });
+        const attendeesMsg = await queueChannel.send({ content: attendeesText });
+        queue.attendeesMessageId = attendeesMsg.id;
 
         // Disable buttons on queue message
-        const message = await channel.messages.fetch(queue.messageId).catch(() => null);
+        const message = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
         if (message) {
           const embed = buildQueueEmbed(queue);
           await message.edit({ embeds: [embed], components: [] });
         }
       }
 
-      activeQueues.delete(shortId);
+      await interaction.editReply(
+        'Queue closed and attendees list has been posted in this channel.'
+      );
+
+      // IMPORTANT: we DO NOT delete from activeQueues here,
+      // so /logsession can still log + clean everything later.
       return;
     }
   } catch (err) {
     console.error('[QUEUE BUTTON] Error in handleQueueButtonInteraction:', err);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'There was an error handling that queue action.',
+        ephemeral: true,
+      });
+    }
   }
 }
 
@@ -710,6 +730,7 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
         maxSlots: cfg.maxSlots,
         channelId: interaction.channelId,
         messageId: null,
+        attendeesMessageId: null,
       };
       for (const r of cfg.roles) blankQueue.roles[r] = [];
 
@@ -724,7 +745,8 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
     }
 
     const attendeesText = buildAttendeesMessage(queue);
-    await interaction.channel.send({ content: attendeesText });
+    const attendeesMsg = await interaction.channel.send({ content: attendeesText });
+    queue.attendeesMessageId = attendeesMsg.id;
 
     await interaction.reply({
       content: '✅ Posted attendees list for that session.',
@@ -741,8 +763,66 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
   }
 }
 
+/**
+ * Called when a session is COMPLETED (e.g. /logsession).
+ * - Logs attendees to SESSION_ATTENDEES_LOG_CHANNEL_ID
+ * - Deletes queue embed + attendees message from queue channel
+ * - Clears queue from memory
+ */
+async function onSessionCompleted(shortId, client) {
+  const queue = activeQueues.get(shortId);
+  if (!queue) {
+    console.log('[QUEUE] No active queue found for completed card', shortId);
+    return;
+  }
+
+  const attendeesText = buildAttendeesMessage(queue);
+
+  // 1) Log attendees to log channel (if configured)
+  if (SESSION_ATTENDEES_LOG_CHANNEL_ID) {
+    try {
+      const logChannel = await client.channels.fetch(SESSION_ATTENDEES_LOG_CHANNEL_ID);
+      if (logChannel && logChannel.isTextBased()) {
+        await logChannel.send({ content: attendeesText });
+        console.log('[QUEUE] Logged attendees for card', shortId, 'to log channel');
+      }
+    } catch (err) {
+      console.error('[QUEUE] Failed to log attendees for card', shortId, err);
+    }
+  } else {
+    console.warn(
+      '[QUEUE] SESSION_ATTENDEES_LOG_CHANNEL_ID is not set – attendees will not be logged.'
+    );
+  }
+
+  // 2) Delete queue + attendees messages from the queue channel
+  try {
+    const queueChannel = await client.channels.fetch(queue.channelId);
+    if (queueChannel && queueChannel.isTextBased()) {
+      if (queue.messageId) {
+        const queueMsg = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
+        if (queueMsg) await queueMsg.delete().catch(() => {});
+      }
+      if (queue.attendeesMessageId) {
+        const attendeesMsg = await queueChannel.messages
+          .fetch(queue.attendeesMessageId)
+          .catch(() => null);
+        if (attendeesMsg) await attendeesMsg.delete().catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error('[QUEUE] Failed to clean up queue messages for card', shortId, err);
+  }
+
+  // 3) Remove from memory
+  activeQueues.delete(shortId);
+  console.log('[QUEUE] Cleaned up queue state for completed card', shortId);
+}
+
 module.exports = {
   openQueueForCard,
   handleQueueButtonInteraction,
   postAttendeesForCard,
+  onSessionCompleted,
+  extractShortId,
 };
