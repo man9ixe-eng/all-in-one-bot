@@ -7,10 +7,11 @@ const {
   ButtonStyle,
 } = require('discord.js');
 
+// Trello auth
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 
-// Queue / ping envs (you said DO NOT change these names)
+// Queue ping + channels (DO NOT change these names – matching your envs)
 const SESSION_QUEUE_PING_INTERVIEW_ROLE_ID = process.env.SESSION_QUEUE_PING_INTERVIEW_ROLE_ID;
 const SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID = process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID;
 const SESSION_QUEUE_PING_TRAINING_ROLE_ID = process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID;
@@ -19,45 +20,44 @@ const SESSION_QUEUECHANNEL_INTERVIEW_ID = process.env.SESSION_QUEUECHANNEL_INTER
 const SESSION_QUEUECHANNEL_MASSSHIFT_ID = process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID;
 const SESSION_QUEUECHANNEL_TRAINING_ID = process.env.SESSION_QUEUECHANNEL_TRAINING_ID;
 
-// Log channel for copies of attendee lists
+// Where the log copy goes (embed, no pings)
 const SESSION_ATTENDEES_LOG_CHANNEL_ID = process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID || null;
 
-// In-memory queues: key = Trello shortLink
+// In-memory queue store: shortLink → queue object
 const activeQueues = new Map();
 
-/**
- * Extract the Trello shortLink from:
- * - Full card URL (https://trello.com/c/SHORT/...)
- * - Or just SHORT code pasted by itself.
- */
+/* -----------------------------------------------------
+ * Helper: Trello card shortLink
+ * ---------------------------------------------------*/
 function extractTrelloShortLink(raw) {
   if (!raw) return null;
   const trimmed = raw.trim();
 
+  // If it’s a URL
   try {
     const url = new URL(trimmed);
     if (url.hostname.includes('trello.com')) {
-      const parts = url.pathname.split('/').filter(Boolean); // ['', 'c', 'SHORT', ...] → ['c','SHORT',...]
-      const cIndex = parts.indexOf('c');
-      if (cIndex !== -1 && parts[cIndex + 1]) {
-        return parts[cIndex + 1];
+      const parts = url.pathname.split('/').filter(Boolean); // ['c','SHORT','...']
+      const idx = parts.indexOf('c');
+      if (idx !== -1 && parts[idx + 1]) {
+        return parts[idx + 1];
       }
     }
   } catch {
-    // not a URL, fall through
+    // not a URL, ignore
   }
 
-  // fallback: last segment before any dash
+  // Otherwise, last part before any dashes
   const lastSeg = trimmed.split('/').pop() || trimmed;
   return lastSeg.split('-')[0];
 }
 
-/**
- * Fetch card info directly from Trello.
- */
+/* -----------------------------------------------------
+ * Helper: Trello fetch (simple, no fancy wrapper)
+ * ---------------------------------------------------*/
 async function fetchCardInfo(shortLink) {
   if (!TRELLO_KEY || !TRELLO_TOKEN) {
-    console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN env vars.');
+    console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN.');
     return null;
   }
 
@@ -69,22 +69,17 @@ async function fetchCardInfo(shortLink) {
 
   const res = await fetch(url);
   if (!res.ok) {
-    console.error('[TRELLO] API error while fetching card:', res.status, await res.text().catch(() => ''));
+    const text = await res.text().catch(() => '');
+    console.error('[TRELLO] Error fetching card:', res.status, text);
     return null;
   }
 
-  const data = await res.json();
-  return data;
+  return res.json();
 }
 
-/**
- * Parse session metadata from Trello card.
- * We rely on the name pattern:
- *   [Interview] 10:50 AM EST - Man9ixe
- * and desc:
- *   Session Type: Interview
- *   Host: man9ixe (5258...)
- */
+/* -----------------------------------------------------
+ * Parse metadata from card
+ * ---------------------------------------------------*/
 function parseSessionMetadataFromCard(card) {
   const meta = {
     sessionType: null,
@@ -98,7 +93,7 @@ function parseSessionMetadataFromCard(card) {
     shortLink: card.shortLink,
   };
 
-  // 1) Type from name prefix
+  // 1) Session type by prefix or labels
   if (card.name.startsWith('[Interview]')) {
     meta.sessionType = 'interview';
     meta.sessionTypeLabel = 'Interview';
@@ -110,21 +105,20 @@ function parseSessionMetadataFromCard(card) {
     meta.sessionTypeLabel = 'Mass Shift';
   }
 
-  // Fallback type from labels if needed
   if (!meta.sessionType && Array.isArray(card.labels)) {
     for (const label of card.labels) {
-      const name = (label.name || '').toLowerCase();
-      if (name.includes('interview')) {
+      const n = (label.name || '').toLowerCase();
+      if (n.includes('interview')) {
         meta.sessionType = 'interview';
         meta.sessionTypeLabel = 'Interview';
         break;
       }
-      if (name.includes('training')) {
+      if (n.includes('training')) {
         meta.sessionType = 'training';
         meta.sessionTypeLabel = 'Training';
         break;
       }
-      if (name.includes('mass') && name.includes('shift')) {
+      if (n.includes('mass') && n.includes('shift')) {
         meta.sessionType = 'massshift';
         meta.sessionTypeLabel = 'Mass Shift';
         break;
@@ -132,18 +126,19 @@ function parseSessionMetadataFromCard(card) {
     }
   }
 
-  // 2) Time + host from card.name
-  // Remove "[Something]" prefix
-  let rest = card.name.replace(/^\[[^\]]+\]\s*/, ''); // "10:50 AM EST - Man9ixe"
-  const dashParts = rest.split('-');
+  // 2) Host + time from card name after [Type]
+  //    e.g. "[Interview] 8:30 PM EST - Man9ixe"
+  const nameWithoutPrefix = card.name.replace(/^\[[^\]]+\]\s*/, '');
+  const dashParts = nameWithoutPrefix.split(' - '); // stricter split
   if (dashParts.length >= 2) {
-    meta.timeLabel = dashParts[0].trim(); // "10:50 AM EST"
-    meta.hostNameFromCard = dashParts.slice(1).join('-').trim(); // "Man9ixe"
+    meta.timeLabel = dashParts[0].trim();                  // "8:30 PM EST"
+    meta.hostNameFromCard = dashParts.slice(1).join(' - ').trim(); // "Man9ixe"
   } else {
-    meta.timeLabel = rest.trim();
+    // No " - host" pattern, treat whole thing as time text
+    meta.timeLabel = nameWithoutPrefix.trim() || null;
   }
 
-  // 3) Host Discord ID from desc line: "Host: man9ixe (5258...)"
+  // 3) Host Discord ID from description "Host: name (1234567890)"
   if (typeof card.desc === 'string') {
     const idMatch = card.desc.match(/\((\d{17,})\)/);
     if (idMatch) {
@@ -151,7 +146,7 @@ function parseSessionMetadataFromCard(card) {
     }
   }
 
-  // 4) Starts in label from due
+  // 4) Human readable "starts in"
   if (card.due) {
     const dueDate = new Date(card.due);
     const now = new Date();
@@ -177,20 +172,19 @@ function parseSessionMetadataFromCard(card) {
   return meta;
 }
 
-/**
- * Queue configuration per session type.
- * Uses ONLY the env names you gave me.
- */
+/* -----------------------------------------------------
+ * Queue config per type
+ * ---------------------------------------------------*/
 function getQueueConfig(sessionType) {
   if (sessionType === 'interview') {
     return {
       queueChannelId: SESSION_QUEUECHANNEL_INTERVIEW_ID,
       pingRoleId: SESSION_QUEUE_PING_INTERVIEW_ROLE_ID,
       roles: {
-        cohost: { key: 'cohost', label: 'Co-Host', emoji: '🤝', max: 1 },
-        overseer: { key: 'overseer', label: 'Overseer', emoji: '👁️', max: 1 },
-        interviewer: { key: 'interviewer', label: 'Interviewer', emoji: '📝', max: 12 },
-        spectator: { key: 'spectator', label: 'Spectator', emoji: '👀', max: 4 },
+        cohost:      { key: 'cohost',      label: 'Co-Host',      emoji: '🤝', max: 1  },
+        overseer:    { key: 'overseer',    label: 'Overseer',     emoji: '👁️', max: 1  },
+        interviewer: { key: 'interviewer', label: 'Interviewer',  emoji: '📝', max: 12 },
+        spectator:   { key: 'spectator',   label: 'Spectator',    emoji: '👀', max: 4  },
       },
     };
   }
@@ -200,11 +194,11 @@ function getQueueConfig(sessionType) {
       queueChannelId: SESSION_QUEUECHANNEL_TRAINING_ID,
       pingRoleId: SESSION_QUEUE_PING_TRAINING_ROLE_ID,
       roles: {
-        cohost: { key: 'cohost', label: 'Co-Host', emoji: '🤝', max: 1 },
-        overseer: { key: 'overseer', label: 'Overseer', emoji: '👁️', max: 1 },
-        trainer: { key: 'trainer', label: 'Trainer', emoji: '📚', max: 6 },
-        assistant: { key: 'assistant', label: 'Assistant', emoji: '🧊', max: 6 },
-        spectator: { key: 'spectator', label: 'Spectator', emoji: '👀', max: 6 },
+        cohost:    { key: 'cohost',    label: 'Co-Host',    emoji: '🤝', max: 1  },
+        overseer:  { key: 'overseer',  label: 'Overseer',   emoji: '👁️', max: 1  },
+        trainer:   { key: 'trainer',   label: 'Trainer',    emoji: '📚', max: 6  },
+        assistant: { key: 'assistant', label: 'Assistant',  emoji: '🧊', max: 6  },
+        spectator: { key: 'spectator', label: 'Spectator',  emoji: '👀', max: 6  },
       },
     };
   }
@@ -214,10 +208,10 @@ function getQueueConfig(sessionType) {
       queueChannelId: SESSION_QUEUECHANNEL_MASSSHIFT_ID,
       pingRoleId: SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID,
       roles: {
-        cohost: { key: 'cohost', label: 'Co-Host', emoji: '🤝', max: 2 },
-        overseer: { key: 'overseer', label: 'Overseer', emoji: '👁️', max: 2 },
-        hostassistant: { key: 'hostassistant', label: 'Host Assistant', emoji: '🧊', max: 6 },
-        operations: { key: 'operations', label: 'Operations', emoji: '🏨', max: 10 },
+        cohost:       { key: 'cohost',       label: 'Co-Host',       emoji: '🤝', max: 2  },
+        overseer:     { key: 'overseer',     label: 'Overseer',      emoji: '👁️', max: 2  },
+        hostassistant:{ key: 'hostassistant',label: 'Host Assistant',emoji: '🧊', max: 6  },
+        operations:   { key: 'operations',   label: 'Operations',    emoji: '🏨', max: 10 },
       },
     };
   }
@@ -233,8 +227,12 @@ function initAssignments(config) {
   return assignments;
 }
 
+/* -----------------------------------------------------
+ * Display helpers
+ * ---------------------------------------------------*/
 function buildHeaderBlock(meta) {
-  const typeLabel = (meta.sessionTypeLabel || 'SESSION').toUpperCase();
+  const typeLabel = (meta.sessionTypeLabel || 'Session').toUpperCase();
+
   const hostLabel = meta.hostNameFromCard || 'Host';
   const timeLabel = meta.timeLabel || 'Time';
 
@@ -266,13 +264,11 @@ function buildQueueDescription(queue) {
   lines.push('💠 **ROLES** 💠');
   lines.push('----------------------------------------------------------------');
 
-  // Overview of each role with capacity & current count
   for (const key of Object.keys(config.roles)) {
     const roleCfg = config.roles[key];
     const current = assignments[key]?.length || 0;
-    const max = roleCfg.max;
     lines.push(
-      `ℹ️ **${roleCfg.label}** (${current}/${max})`
+      `ℹ️ **${roleCfg.label}** (${current}/${roleCfg.max})`
     );
   }
 
@@ -280,7 +276,7 @@ function buildQueueDescription(queue) {
   lines.push('❓ **HOW TO JOIN THE QUEUE** ❓');
   lines.push('----------------------------------------------------------------');
   lines.push('Check the role list above — if your rank is allowed, press the role button you want.');
-  lines.push('You’ll get a private confirmation (only visible to you) that you were added to that role\'s queue.');
+  lines.push('You’ll get a message (only visible to you) that you were added to that role\'s queue.');
   lines.push('Do **NOT** join the game until the attendees post is made in the attendees channel.');
   lines.push('');
   lines.push('❓ **HOW TO LEAVE THE QUEUE / INFORM LATE ARRIVAL** ❓');
@@ -298,7 +294,6 @@ function buildQueueDescription(queue) {
 
 function buildQueueEmbed(queue) {
   const description = buildQueueDescription(queue);
-
   return new EmbedBuilder()
     .setColor(0xfee75c)
     .setDescription(description);
@@ -306,8 +301,8 @@ function buildQueueEmbed(queue) {
 
 function buildQueueComponents(queue) {
   const { meta, config, closed } = queue;
-
   const shortLink = meta.shortLink;
+
   const rows = [];
 
   const joinRow = new ActionRowBuilder();
@@ -345,10 +340,9 @@ function buildQueueComponents(queue) {
   return rows;
 }
 
-/**
- * OPEN QUEUE (called from /sessionqueue).
- * Does NOT reply to interaction; returns info back to command handler.
- */
+/* -----------------------------------------------------
+ * OPEN QUEUE (called from /sessionqueue)
+ * ---------------------------------------------------*/
 async function openQueueForCard(cardOption, client) {
   console.log('[QUEUE] Raw card option:', cardOption);
 
@@ -357,7 +351,7 @@ async function openQueueForCard(cardOption, client) {
     return {
       success: false,
       message:
-        'I could not open a queue for that Trello card.\n• Make sure the link is valid.',
+        'I could not open a queue for that Trello card.\n• Make sure the link or code is valid.',
     };
   }
 
@@ -366,7 +360,7 @@ async function openQueueForCard(cardOption, client) {
     return {
       success: false,
       message:
-        'I could not open a queue for that Trello card.\n• Make sure the link is valid.',
+        'I could not open a queue for that Trello card.\n• Trello may not be reachable or the card does not exist.',
     };
   }
 
@@ -375,7 +369,7 @@ async function openQueueForCard(cardOption, client) {
     return {
       success: false,
       message:
-        'I could not open a queue for that Trello card.\n• The card must have [Interview], [Training], or [Mass Shift] in the name or the correct labels.',
+        'I could not open a queue for that Trello card.\n• The name must start with [Interview], [Training], or [Mass Shift] (or have those labels).',
     };
   }
 
@@ -388,6 +382,7 @@ async function openQueueForCard(cardOption, client) {
     };
   }
 
+  // Get the queue channel
   const queueChannel = await client.channels.fetch(config.queueChannelId).catch(() => null);
   if (!queueChannel || !queueChannel.isTextBased()) {
     return {
@@ -395,6 +390,16 @@ async function openQueueForCard(cardOption, client) {
       message:
         'I could not open a queue because the configured queue channel is invalid or missing.',
     };
+  }
+
+  // Try to refine hostNameFromCard from guild (displayName), if possible
+  if (meta.hostDiscordId && queueChannel.guild) {
+    try {
+      const member = await queueChannel.guild.members.fetch(meta.hostDiscordId);
+      meta.hostNameFromCard = member.displayName || member.user.username || meta.hostNameFromCard;
+    } catch {
+      // ignore if fetch fails, keep whatever we parsed
+    }
   }
 
   const assignments = initAssignments(config);
@@ -437,6 +442,9 @@ async function openQueueForCard(cardOption, client) {
   };
 }
 
+/* -----------------------------------------------------
+ * Update queue message
+ * ---------------------------------------------------*/
 async function updateQueueMessage(queue, client) {
   try {
     const channel = await client.channels.fetch(queue.queueChannelId).catch(() => null);
@@ -454,34 +462,29 @@ async function updateQueueMessage(queue, client) {
   }
 }
 
-/**
- * Helper for resolving usernames for log embed (no pings).
- */
+/* -----------------------------------------------------
+ * Attendees posting helpers
+ * ---------------------------------------------------*/
 async function resolveDisplayName(guild, userId) {
   if (!guild) return `<@${userId}>`;
   try {
     const member = await guild.members.fetch(userId);
-    return member.displayName;
+    return member.displayName || member.user.username || `<@${userId}>`;
   } catch {
     return `<@${userId}>`;
   }
 }
 
-/**
- * Build + send attendees messages:
- * 1) Regular text post in the queue channel WITH pings.
- * 2) Embed log in SESSION_ATTENDEES_LOG_CHANNEL_ID WITHOUT pings.
- */
 async function postAttendeesForQueue(queue, client) {
   const { meta, config, assignments } = queue;
 
-  // 1) Queue channel post (with pings)
+  // 1) Visible attendees post in queue channel WITH pings
   const queueChannel = await client.channels.fetch(queue.queueChannelId).catch(() => null);
   if (queueChannel && queueChannel.isTextBased()) {
     const hostMention = meta.hostDiscordId ? `<@${meta.hostDiscordId}>` : (meta.hostNameFromCard || 'TBA');
 
-    const cohostId = assignments.cohost?.[0];
-    const overseerId = assignments.overseer?.[0];
+    const cohostId = (assignments.cohost || [])[0];
+    const overseerId = (assignments.overseer || [])[0];
 
     const cohostMention = cohostId ? `<@${cohostId}>` : 'None selected';
     const overseerMention = overseerId ? `<@${overseerId}>` : 'None selected';
@@ -489,26 +492,23 @@ async function postAttendeesForQueue(queue, client) {
     const interviewerList = assignments.interviewer || [];
     const spectatorList = assignments.spectator || [];
 
-    const interviewerLines = [];
     const maxInterviewers = config.roles.interviewer?.max ?? 0;
+    const maxSpectators = config.roles.spectator?.max ?? 0;
+
+    const interviewerLines = [];
     for (let i = 0; i < maxInterviewers; i++) {
       const userId = interviewerList[i];
-      if (userId) {
-        interviewerLines.push(`${i + 1}. <@${userId}>`);
-      } else {
-        interviewerLines.push(`${i + 1}.`);
-      }
+      interviewerLines.push(
+        userId ? `${i + 1}. <@${userId}>` : `${i + 1}.`
+      );
     }
 
     const spectatorLines = [];
-    const maxSpectators = config.roles.spectator?.max ?? 0;
     for (let i = 0; i < maxSpectators; i++) {
       const userId = spectatorList[i];
-      if (userId) {
-        spectatorLines.push(`${i + 1}. <@${userId}>`);
-      } else {
-        spectatorLines.push(`${i + 1}.`);
-      }
+      spectatorLines.push(
+        userId ? `${i + 1}. <@${userId}>` : `${i + 1}.`
+      );
     }
 
     const text =
@@ -523,12 +523,12 @@ async function postAttendeesForQueue(queue, client) {
       '────────────\n' +
       '\n' +
       '🟡  Interviewers 🟡\n' +
-      (interviewerLines.length ? interviewerLines.join('\n') : 'None selected') +
+      (maxInterviewers ? interviewerLines.join('\n') : 'None configured for this session type') +
       '\n\n' +
       '────────────\n' +
       '\n' +
       '⚪  Spectators ⚪\n' +
-      (spectatorLines.length ? spectatorLines.join('\n') : 'None selected') +
+      (maxSpectators ? spectatorLines.join('\n') : 'None configured for this session type') +
       '\n\n' +
       '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.\n' +
       '🧊 Failure to join on time will result in a **written warning**. :(';
@@ -539,7 +539,7 @@ async function postAttendeesForQueue(queue, client) {
     });
   }
 
-  // 2) Log channel embed (WITHOUT pings, username only)
+  // 2) Log embed in SESSION_ATTENDEES_LOG_CHANNEL_ID (NO pings)
   if (SESSION_ATTENDEES_LOG_CHANNEL_ID) {
     const logChannel = await client.channels
       .fetch(SESSION_ATTENDEES_LOG_CHANNEL_ID)
@@ -585,9 +585,9 @@ async function postAttendeesForQueue(queue, client) {
         spectatorNames.push(await resolveDisplayName(guild, id));
       }
 
-      const embedLines = [];
+      const descLines = [];
 
-      embedLines.push(
+      descLines.push(
         `**Logged at:** ${dateStr} • ${timeStr} EST`,
         `**Session:** ${meta.cardName}`,
         `**Trello Card:** ${meta.cardUrl}`,
@@ -600,33 +600,32 @@ async function postAttendeesForQueue(queue, client) {
       );
 
       if (interviewerNames.length) {
-        interviewerNames.forEach((n, i) => embedLines.push(`${i + 1}. ${n}`));
+        interviewerNames.forEach((n, i) => descLines.push(`${i + 1}. ${n}`));
       } else {
-        embedLines.push('None selected');
+        descLines.push('None selected');
       }
 
-      embedLines.push('', '**Spectators**');
+      descLines.push('', '**Spectators**');
 
       if (spectatorNames.length) {
-        spectatorNames.forEach((n, i) => embedLines.push(`${i + 1}. ${n}`));
+        spectatorNames.forEach((n, i) => descLines.push(`${i + 1}. ${n}`));
       } else {
-        embedLines.push('None selected');
+        descLines.push('None selected');
       }
 
       const embed = new EmbedBuilder()
         .setColor(0x5865f2)
         .setTitle(`Session Attendees • ${meta.sessionTypeLabel || 'Session'}`)
-        .setDescription(embedLines.join('\n'));
+        .setDescription(descLines.join('\n'));
 
       await logChannel.send({ embeds: [embed] });
     }
   }
 }
 
-/**
- * Exported so /sessionattendees can manually trigger attendees post.
- * cardOption can be full Trello URL or just shortLink.
- */
+/* -----------------------------------------------------
+ * Public helper so /sessionattendees can call it
+ * ---------------------------------------------------*/
 async function postAttendeesForCard(cardOption, client) {
   const shortLink = extractTrelloShortLink(cardOption);
   const queue = activeQueues.get(shortLink);
@@ -645,10 +644,9 @@ async function postAttendeesForCard(cardOption, client) {
   return { success: true };
 }
 
-/**
- * Handle button interactions for join/leave/close.
- * This function DOES handle interaction acks itself.
- */
+/* -----------------------------------------------------
+ * Button handler
+ * ---------------------------------------------------*/
 async function handleQueueButtonInteraction(interaction) {
   const customId = interaction.customId || '';
   if (!customId.startsWith('queue_')) return;
@@ -660,14 +658,13 @@ async function handleQueueButtonInteraction(interaction) {
 
   const queue = activeQueues.get(shortLink);
   if (!queue) {
-    // Queue no longer active
-    await interaction.reply({
+    const msg = await interaction.reply({
       content: 'This queue is no longer active.',
       ephemeral: true,
-    }).catch(() => {});
-    setTimeout(() => {
-      interaction.deleteReply().catch(() => {});
-    }, 5000);
+    }).catch(() => null);
+    if (msg) {
+      setTimeout(() => msg.delete().catch(() => {}), 5000);
+    }
     return;
   }
 
@@ -676,7 +673,7 @@ async function handleQueueButtonInteraction(interaction) {
 
   try {
     if (action === 'join') {
-      await interaction.deferUpdate(); // update the original message (we also edit it separately)
+      await interaction.deferUpdate();
 
       const roleCfg = config.roles[roleKey];
       if (!roleCfg) {
@@ -688,7 +685,7 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      // Remove user from any role first
+      // Remove user from any role first (claim-first but only one role at a time)
       for (const key of Object.keys(assignments)) {
         const idx = assignments[key].indexOf(userId);
         if (idx !== -1) assignments[key].splice(idx, 1);
@@ -704,7 +701,7 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      list.push(userId);
+      list.push(userId); // claim-first ordering
 
       await updateQueueMessage(queue, interaction.client);
 
@@ -743,7 +740,7 @@ async function handleQueueButtonInteraction(interaction) {
     if (action === 'close') {
       await interaction.deferUpdate();
 
-      // Only host can close (for now)
+      // Only host can close
       if (meta.hostDiscordId && interaction.user.id !== meta.hostDiscordId) {
         const msg = await interaction.followUp({
           content: 'Only the host of this session can close this queue.',

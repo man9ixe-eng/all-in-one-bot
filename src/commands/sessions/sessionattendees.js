@@ -10,7 +10,7 @@ module.exports = {
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link (or short code)')
+        .setDescription('Trello card link or short code')
         .setRequired(true)
     ),
 
@@ -38,26 +38,14 @@ module.exports = {
         interaction.deleteReply().catch(() => {});
       }, 5000);
     } catch (err) {
-      console.error(
-        '[SESSIONATTENDEES] Error while executing /sessionattendees:',
-        err
-      );
+      console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
+
+      const msg = 'There was an error while posting the attendees list for that card.';
 
       if (interaction.deferred || interaction.replied) {
-        await interaction
-          .editReply({
-            content:
-              'There was an error while posting the attendees list for that card.',
-          })
-          .catch(() => {});
+        await interaction.editReply({ content: msg }).catch(() => {});
       } else {
-        await interaction
-          .reply({
-            content:
-              'There was an error while posting the attendees list for that card.',
-            ephemeral: true,
-          })
-          .catch(() => {});
+        await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
       }
     }
   },
