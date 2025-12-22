@@ -1,6 +1,4 @@
 // src/commands/sessions/sessionattendees.js
-'use strict';
-
 const { SlashCommandBuilder } = require('discord.js');
 const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
 
@@ -11,22 +9,42 @@ module.exports = {
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or short ID')
+        .setDescription('Trello card link or short ID used for the queue')
         .setRequired(true)
     ),
 
   async execute(interaction) {
     try {
-      await postAttendeesForCard(interaction);
+      await interaction.deferReply({ ephemeral: true });
+
+      const cardInput = interaction.options.getString('card', true);
+
+      const result = await postAttendeesForCard(interaction, cardInput);
+
+      if (!result.success) {
+        await interaction.editReply({
+          content: `❌ ${result.error}`,
+        });
+        return;
+      }
+
+      await interaction.editReply({
+        content: '✅ Posted the attendees list and logged the session.',
+      });
     } catch (err) {
       console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
-
-      if (!interaction.replied && !interaction.deferred) {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({
+          content:
+            '❌ There was an error while executing this command. Please try again or check the logs.',
+        });
+      } else {
         await interaction.reply({
-          content: 'There was an error while executing this interaction.',
-          ephemeral: true
-        }).catch(() => {});
+          content:
+            '❌ There was an error while executing this command. Please try again or check the logs.',
+          ephemeral: true,
+        });
       }
     }
-  }
+  },
 };
