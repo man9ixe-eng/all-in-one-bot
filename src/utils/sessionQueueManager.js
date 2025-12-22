@@ -22,7 +22,7 @@ const SESSION_QUEUE_PING_INTERVIEW_ROLE_ID = process.env.SESSION_QUEUE_PING_INTE
 const SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID = process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID;
 const SESSION_QUEUE_PING_TRAINING_ROLE_ID = process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID;
 
-// NEW: where to log final attendees when session is completed
+// Where to log final attendees when session is completed
 const SESSION_ATTENDEES_LOG_CHANNEL_ID = process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID;
 
 if (!TRELLO_KEY || !TRELLO_TOKEN) {
@@ -31,6 +31,19 @@ if (!TRELLO_KEY || !TRELLO_TOKEN) {
 
 // In-memory queues: shortId -> queueState
 const activeQueues = new Map();
+
+/**
+ * Helper: delete an ephemeral reply after N ms.
+ */
+function scheduleEphemeralDelete(interaction, ms = 5000) {
+  try {
+    setTimeout(() => {
+      interaction.deleteReply().catch(() => {});
+    }, ms);
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * Helper: parse Trello short link from a URL or raw ID.
@@ -338,7 +351,8 @@ function buildQueueComponents(queue) {
 }
 
 /**
- * Build attendees text message (plain, not embed).
+ * Build attendees text message (plain, not embed) – this one PINGS people.
+ * This is what gets posted in the queue channel when the queue is closed.
  */
 function buildAttendeesMessage(queue) {
   const cfg = getQueueRoleConfig(queue.sessionType);
@@ -360,7 +374,6 @@ function buildAttendeesMessage(queue) {
   lines.push('', '────────────', '');
 
   if (queue.sessionType === 'interview') {
-    // Interviewers + Spectators
     const interviewers = qRoles.interviewer || [];
     const spectators = qRoles.spectator || [];
 
@@ -378,7 +391,6 @@ function buildAttendeesMessage(queue) {
       lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
     }
   } else {
-    // Training / Mass shift variant
     const supervisors = qRoles.supervisor || [];
     const spectators = qRoles.spectator || [];
 
@@ -404,6 +416,109 @@ function buildAttendeesMessage(queue) {
   );
 
   return lines.join('\n');
+}
+
+/**
+ * Build LOG embed (NO pings, usernames only) for the log channel.
+ */
+function buildAttendeesLogEmbed(queue, userNamesById) {
+  const cfg = getQueueRoleConfig(queue.sessionType);
+  const displayName = cfg ? cfg.displayName : 'Session';
+
+  const loggedAt = new Date();
+  const loggedAtStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Toronto',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(loggedAt);
+
+  const qRoles = queue.roles || {};
+  const nameFor = (id) => {
+    if (!id) return '';
+    return userNamesById[id] || `Unknown (${id})`;
+  };
+
+  function formatNumberedList(ids, totalSlots) {
+    const list = [];
+    for (let i = 0; i < totalSlots; i++) {
+      const id = ids[i];
+      const label = id ? nameFor(id) : '';
+      list.push(`${i + 1}. ${label}`);
+    }
+    return list.join('\n') || 'None selected';
+  }
+
+  const cohostId = (qRoles.cohost && qRoles.cohost[0]) || null;
+  const overseerId = (qRoles.overseer && qRoles.overseer[0]) || null;
+
+  let fields = [];
+
+  fields.push({
+    name: 'Host',
+    value: nameFor(queue.hostId) || `Unknown (${queue.hostId})`,
+    inline: false,
+  });
+
+  fields.push({
+    name: 'Co-Host',
+    value: cohostId ? nameFor(cohostId) : 'None selected',
+    inline: false,
+  });
+
+  fields.push({
+    name: 'Overseer',
+    value: overseerId ? nameFor(overseerId) : 'None selected',
+    inline: false,
+  });
+
+  if (queue.sessionType === 'interview') {
+    const interviewers = qRoles.interviewer || [];
+    const spectators = qRoles.spectator || [];
+    fields.push({
+      name: 'Interviewers',
+      value: formatNumberedList(interviewers, 12),
+      inline: false,
+    });
+    fields.push({
+      name: 'Spectators',
+      value: formatNumberedList(spectators, 4),
+      inline: false,
+    });
+  } else {
+    const supervisors = qRoles.supervisor || [];
+    const spectators = qRoles.spectator || [];
+    const cfgSlots = getQueueRoleConfig(queue.sessionType)?.maxSlots || {};
+    const maxSup = cfgSlots.supervisor || supervisors.length || 4;
+    const maxSpec = cfgSlots.spectator || spectators.length || 4;
+
+    fields.push({
+      name: 'Supervisors',
+      value: formatNumberedList(supervisors, maxSup),
+      inline: false,
+    });
+    fields.push({
+      name: 'Spectators',
+      value: formatNumberedList(spectators, maxSpec),
+      inline: false,
+    });
+  }
+
+  const descLines = [];
+  descLines.push(`**Logged:** ${loggedAtStr} (ET)`);
+  if (queue.due) {
+    const startTime = formatLocalTime(queue.due);
+    descLines.push(`**Scheduled Time:** ${startTime} (ET)`);
+  }
+  if (queue.cardUrl) {
+    descLines.push(`**Trello Card:** ${queue.cardUrl}`);
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`${displayName} Session Log`)
+    .setDescription(descLines.join('\n'))
+    .addFields(fields)
+    .setColor(0x3498db)
+    .setFooter({ text: `Card short ID: ${queue.shortId}` });
 }
 
 /**
@@ -449,6 +564,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
           '• The queue channels/roles are configured in SESSION_* and QUEUE_* env vars.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
@@ -461,6 +577,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
         content: 'I could not detect the session type from that Trello card.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
@@ -471,6 +588,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
         content: `I could not open a queue for that Trello card.\n• Make sure SESSION_QUEUECHANNEL_* env vars are set for ${sessionType}.`,
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
@@ -480,6 +598,7 @@ async function openQueueForCard(interaction, cardOptionRaw) {
         content: 'The configured queue channel is invalid or not text-based.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
@@ -516,23 +635,27 @@ async function openQueueForCard(interaction, cardOptionRaw) {
     };
 
     if (pingRoleId) {
-      // Ping outside embed
       messagePayload.content = `<@&${pingRoleId}>`;
     }
 
-    const message = await queueChannel.send(messagePayload);
+    const queueMessage = await queueChannel.send(messagePayload);
 
-    queueState.messageId = message.id;
+    queueState.messageId = queueMessage.id;
     activeQueues.set(shortId, queueState);
 
     console.log(
       `[QUEUE] Opened queue for card ${shortId} in channel ${channelId}`
     );
 
+    const sessionTitle = `${cfg.displayName ? `[${cfg.displayName}] ` : ''}${formatLocalTime(
+      queueState.due
+    )} - ${queueState.hostDisplayName}`;
+
     await interaction.reply({
-      content: '✅ Session queue has been posted.',
+      content: `✅ Opened queue for ${sessionTitle} in <#${channelId}>`,
       ephemeral: true,
     });
+    scheduleEphemeralDelete(interaction);
   } catch (err) {
     console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', err);
     if (!interaction.replied && !interaction.deferred) {
@@ -540,13 +663,14 @@ async function openQueueForCard(interaction, cardOptionRaw) {
         content: 'There was an error while opening the queue for that Trello card.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
     }
   }
 }
 
 /**
  * Handle queue buttons (join/leave/close).
- * Now uses EPHEMERAL replies instead of DMs.
+ * Uses EPHEMERAL replies instead of DMs.
  */
 async function handleQueueButtonInteraction(interaction) {
   try {
@@ -554,13 +678,11 @@ async function handleQueueButtonInteraction(interaction) {
     const parts = customId.split(':');
 
     if (parts[0] !== 'sessionQueue') {
-      // Not ours – ignore silently.
       return;
     }
 
     const action = parts[1];
 
-    // Acknowledge quickly with an ephemeral defer so we can edit it
     await interaction.deferReply({ ephemeral: true });
 
     if (action === 'join') {
@@ -569,21 +691,21 @@ async function handleQueueButtonInteraction(interaction) {
       const queue = activeQueues.get(shortId);
       if (!queue) {
         await interaction.editReply('This queue is no longer active.');
+        scheduleEphemeralDelete(interaction);
         return;
       }
 
       const cfg = getQueueRoleConfig(queue.sessionType);
       if (!cfg.roles.includes(roleKey)) {
         await interaction.editReply('That role is not valid for this queue.');
+        scheduleEphemeralDelete(interaction);
         return;
       }
 
-      // Remove user from all roles first
       for (const rk of Object.keys(queue.roles)) {
         queue.roles[rk] = queue.roles[rk].filter(id => id !== interaction.user.id);
       }
 
-      // Now add to chosen role if there is space
       const current = queue.roles[roleKey] || [];
       const max = queue.maxSlots[roleKey] || 0;
 
@@ -597,8 +719,8 @@ async function handleQueueButtonInteraction(interaction) {
           `You have been added to the **${cfg.labels[roleKey]}** queue for this session.`
         );
       }
+      scheduleEphemeralDelete(interaction);
 
-      // Update original queue message
       const queueChannel = await interaction.client.channels.fetch(queue.channelId);
       if (queueChannel && queueChannel.isTextBased()) {
         const message = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
@@ -617,6 +739,7 @@ async function handleQueueButtonInteraction(interaction) {
       const queue = activeQueues.get(shortId);
       if (!queue) {
         await interaction.editReply('This queue is no longer active.');
+        scheduleEphemeralDelete(interaction);
         return;
       }
 
@@ -627,6 +750,7 @@ async function handleQueueButtonInteraction(interaction) {
       await interaction.editReply(
         'You have been removed from the session queue.'
       );
+      scheduleEphemeralDelete(interaction);
 
       const queueChannel = await interaction.client.channels.fetch(queue.channelId);
       if (queueChannel && queueChannel.isTextBased()) {
@@ -646,17 +770,16 @@ async function handleQueueButtonInteraction(interaction) {
       const queue = activeQueues.get(shortId);
       if (!queue) {
         await interaction.editReply('This queue is no longer active.');
+        scheduleEphemeralDelete(interaction);
         return;
       }
 
       const queueChannel = await interaction.client.channels.fetch(queue.channelId);
       if (queueChannel && queueChannel.isTextBased()) {
-        // Post attendees
         const attendeesText = buildAttendeesMessage(queue);
         const attendeesMsg = await queueChannel.send({ content: attendeesText });
         queue.attendeesMessageId = attendeesMsg.id;
 
-        // Disable buttons on queue message
         const message = await queueChannel.messages.fetch(queue.messageId).catch(() => null);
         if (message) {
           const embed = buildQueueEmbed(queue);
@@ -667,9 +790,9 @@ async function handleQueueButtonInteraction(interaction) {
       await interaction.editReply(
         'Queue closed and attendees list has been posted in this channel.'
       );
+      scheduleEphemeralDelete(interaction);
 
-      // IMPORTANT: we DO NOT delete from activeQueues here,
-      // so /logsession can still log + clean everything later.
+      // NOTE: we keep queue in memory so /logsession can still log + clean later.
       return;
     }
   } catch (err) {
@@ -679,6 +802,7 @@ async function handleQueueButtonInteraction(interaction) {
         content: 'There was an error handling that queue action.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
     }
   }
 }
@@ -699,13 +823,13 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
           '• Make sure the link is valid',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
     const queue = activeQueues.get(shortId);
 
     if (!queue) {
-      // Still attempt to fetch card info & build a "blank" queue just so host + text works.
       const card = await fetchCardInfo(shortId);
       const sessionType = detectSessionType(card);
       if (!sessionType) {
@@ -713,6 +837,7 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
           content: 'I could not detect the session type from that Trello card.',
           ephemeral: true,
         });
+        scheduleEphemeralDelete(interaction);
         return;
       }
       const cfg = getQueueRoleConfig(sessionType);
@@ -741,6 +866,7 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
         content: '✅ Posted attendees list (no saved queue, so all slots are blank).',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
       return;
     }
 
@@ -752,6 +878,7 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
       content: '✅ Posted attendees list for that session.',
       ephemeral: true,
     });
+    scheduleEphemeralDelete(interaction);
   } catch (err) {
     console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
     if (!interaction.replied && !interaction.deferred) {
@@ -759,13 +886,47 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
         content: 'There was an error while posting the attendees list.',
         ephemeral: true,
       });
+      scheduleEphemeralDelete(interaction);
     }
   }
 }
 
 /**
+ * Collect all unique user IDs that appear in the queue (for log username resolution).
+ */
+function collectQueueUserIds(queue) {
+  const ids = new Set();
+  if (queue.hostId) ids.add(queue.hostId);
+  const roles = queue.roles || {};
+  for (const key of Object.keys(roles)) {
+    for (const userId of roles[key]) {
+      if (userId) ids.add(userId);
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * Resolve usernames for a set of IDs.
+ */
+async function resolveUsernames(client, userIds) {
+  const result = {};
+  const promises = userIds.map(async (id) => {
+    try {
+      const user = await client.users.fetch(id);
+      result[id] = user.username;
+    } catch {
+      // ignore missing user
+    }
+  });
+
+  await Promise.all(promises);
+  return result;
+}
+
+/**
  * Called when a session is COMPLETED (e.g. /logsession).
- * - Logs attendees to SESSION_ATTENDEES_LOG_CHANNEL_ID
+ * - Logs attendees to SESSION_ATTENDEES_LOG_CHANNEL_ID (embed, usernames only)
  * - Deletes queue embed + attendees message from queue channel
  * - Clears queue from memory
  */
@@ -776,14 +937,22 @@ async function onSessionCompleted(shortId, client) {
     return;
   }
 
-  const attendeesText = buildAttendeesMessage(queue);
+  let userNamesById = {};
+  try {
+    const userIds = collectQueueUserIds(queue);
+    if (userIds.length > 0) {
+      userNamesById = await resolveUsernames(client, userIds);
+    }
+  } catch (err) {
+    console.error('[QUEUE] Failed to resolve usernames for log embed', err);
+  }
 
-  // 1) Log attendees to log channel (if configured)
   if (SESSION_ATTENDEES_LOG_CHANNEL_ID) {
     try {
       const logChannel = await client.channels.fetch(SESSION_ATTENDEES_LOG_CHANNEL_ID);
       if (logChannel && logChannel.isTextBased()) {
-        await logChannel.send({ content: attendeesText });
+        const logEmbed = buildAttendeesLogEmbed(queue, userNamesById);
+        await logChannel.send({ embeds: [logEmbed] });
         console.log('[QUEUE] Logged attendees for card', shortId, 'to log channel');
       }
     } catch (err) {
@@ -795,7 +964,6 @@ async function onSessionCompleted(shortId, client) {
     );
   }
 
-  // 2) Delete queue + attendees messages from the queue channel
   try {
     const queueChannel = await client.channels.fetch(queue.channelId);
     if (queueChannel && queueChannel.isTextBased()) {
@@ -814,7 +982,6 @@ async function onSessionCompleted(shortId, client) {
     console.error('[QUEUE] Failed to clean up queue messages for card', shortId, err);
   }
 
-  // 3) Remove from memory
   activeQueues.delete(shortId);
   console.log('[QUEUE] Cleaned up queue state for completed card', shortId);
 }
