@@ -379,14 +379,14 @@ function buildAttendeesMessage(queue) {
     const spectators = qRoles.spectator || [];
 
     lines.push('🟡  Supervisors 🟡');
-    const maxSup = (getQueueRoleConfig(queue.sessionType).maxSlots.supervisor) || 4;
+    const maxSup = (cfg.maxSlots.supervisor) || 4;
     for (let i = 0; i < maxSup; i++) {
       const userId = supervisors[i];
       lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
     }
 
     lines.push('', '────────────', '', '⚪  Spectators ⚪');
-    const maxSpecs = (getQueueRoleConfig(queue.sessionType).maxSlots.spectator) || 4;
+    const maxSpecs = (cfg.maxSlots.spectator) || 4;
     for (let i = 0; i < maxSpecs; i++) {
       const userId = spectators[i];
       lines.push(`${i + 1}. ${userId ? `<@${userId}>` : ''}`);
@@ -505,11 +505,16 @@ async function openQueueForCard(interaction, cardOptionRaw) {
     const embed = buildQueueEmbed(queueState);
     const components = buildQueueComponents(queueState);
 
-    const message = await queueChannel.send({
-      content: pingRoleId ? `<@&${pingRoleId}>` : null,
+    const messagePayload = {
       embeds: [embed],
       components,
-    });
+    };
+
+    if (pingRoleId) {
+      messagePayload.content = `<@&${pingRoleId}>`;
+    }
+
+    const message = await queueChannel.send(messagePayload);
 
     queueState.messageId = message.id;
     activeQueues.set(shortId, queueState);
@@ -636,16 +641,13 @@ async function handleQueueButtonInteraction(interaction) {
       const queue = activeQueues.get(shortId);
       if (!queue) return;
 
-      // Post attendees in same channel
       const channel = await interaction.client.channels.fetch(queue.channelId);
       if (channel && channel.isTextBased()) {
+        // Post attendees
         const attendeesText = buildAttendeesMessage(queue);
         await channel.send({ content: attendeesText });
-      }
 
-      // Optionally disable buttons on the queue message
-      const channel = await interaction.client.channels.fetch(queue.channelId);
-      if (channel && channel.isTextBased()) {
+        // Disable buttons on queue message
         const message = await channel.messages.fetch(queue.messageId).catch(() => null);
         if (message) {
           const embed = buildQueueEmbed(queue);
@@ -683,7 +685,7 @@ async function postAttendeesForCard(interaction, cardOptionRaw) {
     const queue = activeQueues.get(shortId);
 
     if (!queue) {
-      // We will still attempt to fetch card info & build a "blank" queue just so host + text works.
+      // Still attempt to fetch card info & build a "blank" queue just so host + text works.
       const card = await fetchCardInfo(shortId);
       const sessionType = detectSessionType(card);
       if (!sessionType) {
