@@ -1,62 +1,65 @@
 // src/commands/sessions/sessionattendees.js
-
 const { SlashCommandBuilder } = require('discord.js');
 const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionattendees')
-    .setDescription('Post the selected attendees list based on an open queue')
-    .addStringOption((opt) =>
-      opt
+    .setDescription('Post the selected attendees list for a session queue.')
+    .addStringOption((option) =>
+      option
         .setName('card')
-        .setDescription('Trello card link or short ID used for the queue')
+        .setDescription('Trello card link or short URL (same one used for /sessionqueue)')
         .setRequired(true),
     ),
 
   async execute(interaction) {
-    const cardInput = interaction.options.getString('card', true);
-
     try {
-      const result = await postAttendeesForCard(
-        interaction.client,
-        cardInput,
-      );
+      await interaction.deferReply({ ephemeral: true });
 
-      if (!result.ok) {
-        const msg =
-          result.errorMessage ||
-          'I could not post attendees for that Trello card.';
-        if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content: msg, ephemeral: true });
-        } else if (interaction.deferred) {
-          await interaction.editReply({ content: msg });
+      const cardInput = interaction.options.getString('card', true);
+
+      const result = await postAttendeesForCard(interaction.client, cardInput);
+
+      if (!result || !result.ok) {
+        const reason = result && result.reason;
+
+        if (reason === 'no-queue') {
+          await interaction.editReply(
+            'I could not post attendees for that Trello card.\n' +
+              '• Make sure you already opened a queue for this card using `/sessionqueue`.',
+          );
+        } else if (reason === 'invalid-card') {
+          await interaction.editReply(
+            'I could not understand that Trello link. Please use the full card URL or short URL.',
+          );
+        } else {
+          await interaction.editReply(
+            'I could not post attendees for that Trello card. Check that the queue exists and try again.',
+          );
         }
+
         return;
       }
 
-      const confirm = `✅ Posted attendees list for that card.`;
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: confirm, ephemeral: true });
-      } else {
-        await interaction.editReply({ content: confirm });
-      }
+      await interaction.editReply(
+        `✅ Attendees post sent in <#${result.channelId}> for Trello card \`${result.shortId}\`.`,
+      );
     } catch (err) {
       console.error(
         '[SESSIONATTENDEES] Error while executing /sessionattendees:',
         err,
       );
 
-      if (!interaction.replied && !interaction.deferred) {
-        try {
-          await interaction.reply({
-            content:
-              'There was an error while trying to post the attendees list for that card.',
-            ephemeral: true,
-          });
-        } catch {
-          // ignore
-        }
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(
+          'There was an error while executing this command.',
+        );
+      } else {
+        await interaction.reply({
+          content: 'There was an error while executing this command.',
+          ephemeral: true,
+        });
       }
     }
   },
