@@ -1,49 +1,63 @@
 // src/commands/sessions/sessionattendees.js
+
 const { SlashCommandBuilder } = require('discord.js');
 const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionattendees')
-    .setDescription('Post the selected attendees list for a session queue.')
+    .setDescription('Post the selected attendees for an existing session queue.')
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or short ID used for the queue')
+        .setDescription('Trello card link (or short code)')
         .setRequired(true)
     ),
 
   async execute(interaction) {
+    const cardOption = interaction.options.getString('card', true).trim();
+
     try {
       await interaction.deferReply({ ephemeral: true });
 
-      const cardInput = interaction.options.getString('card', true);
+      const result = await postAttendeesForCard(cardOption, interaction.client);
 
-      const result = await postAttendeesForCard(interaction, cardInput);
-
-      if (!result.success) {
-        await interaction.editReply({
-          content: `❌ ${result.error}`,
-        });
+      if (!result || !result.success) {
+        const message =
+          result?.message ||
+          'I could not post attendees for that Trello card.';
+        await interaction.editReply({ content: message });
         return;
       }
 
       await interaction.editReply({
-        content: '✅ Posted the attendees list and logged the session.',
+        content: '✅ Posted attendees list.',
       });
+
+      setTimeout(() => {
+        interaction.deleteReply().catch(() => {});
+      }, 5000);
     } catch (err) {
-      console.error('[SESSIONATTENDEES] Error while executing /sessionattendees:', err);
+      console.error(
+        '[SESSIONATTENDEES] Error while executing /sessionattendees:',
+        err
+      );
+
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content:
-            '❌ There was an error while executing this command. Please try again or check the logs.',
-        });
+        await interaction
+          .editReply({
+            content:
+              'There was an error while posting the attendees list for that card.',
+          })
+          .catch(() => {});
       } else {
-        await interaction.reply({
-          content:
-            '❌ There was an error while executing this command. Please try again or check the logs.',
-          ephemeral: true,
-        });
+        await interaction
+          .reply({
+            content:
+              'There was an error while posting the attendees list for that card.',
+            ephemeral: true,
+          })
+          .catch(() => {});
       }
     }
   },
