@@ -1,58 +1,34 @@
-// src/commands/sessions/sessionqueue.js
-
 const { SlashCommandBuilder } = require('discord.js');
 const { openQueueForCard } = require('../../utils/sessionQueueManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open a session queue for a Trello card.')
+    .setDescription('Open a staff queue for a Trello session card.')
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or short code')
-        .setRequired(true)
+        .setDescription('Trello card link or short ID')
+        .setRequired(true),
     ),
-
   async execute(interaction) {
-    const cardOption = interaction.options.getString('card', true).trim();
-
-    console.log('[QUEUE] Raw card option:', cardOption);
+    const cardOption = interaction.options.getString('card');
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await openQueueForCard(interaction, cardOption);
+    } catch (error) {
+      console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', error);
 
-      const result = await openQueueForCard(cardOption, interaction.client);
-
-      if (!result || !result.success) {
-        const message =
-          result?.message ||
-          'I could not open a queue for that Trello card.';
-        await interaction.editReply({ content: message });
-        return;
-      }
-
-      const { cardName, queueChannelId } = result;
-      const channelMention = queueChannelId ? `<#${queueChannelId}>` : '#unknown';
-
-      const confirmMessage =
-        `✅ Opened queue for **${cardName}** in ${channelMention}.`;
-
-      await interaction.editReply({ content: confirmMessage });
-
-      // Auto-delete the ephemeral confirm after 5 seconds
-      setTimeout(() => {
-        interaction.deleteReply().catch(() => {});
-      }, 5000);
-    } catch (err) {
-      console.error('[SESSIONQUEUE] Error while executing /sessionqueue:', err);
-
-      const msg = 'There was an error while trying to open that queue. Please check the Trello card link and try again.';
-
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: msg }).catch(() => {});
+      // Avoid the "Interaction has already been acknowledged" error
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({
+          content: 'There was an error while opening the session queue.',
+          ephemeral: true,
+        }).catch(() => {});
       } else {
-        await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+        await interaction.editReply({
+          content: 'There was an error while opening the session queue.',
+        }).catch(() => {});
       }
     }
   },

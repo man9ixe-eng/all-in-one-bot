@@ -1,58 +1,35 @@
-// src/commands/sessions/logsession.js
-
 const { SlashCommandBuilder } = require('discord.js');
-const { extractShortId, onSessionCompleted } = require('../../utils/sessionQueueManager');
 const { completeSessionCard } = require('../../utils/trelloClient');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('logsession')
-    .setDescription('Mark a session Trello card as completed and log its attendees.')
+    .setDescription('Mark a Trello session card as completed.')
     .addStringOption(option =>
       option
         .setName('card')
-        .setDescription('Trello card link or short ID for the session.')
+        .setDescription('Trello card URL or ID')
         .setRequired(true)
     ),
+
   async execute(interaction) {
-    const cardOption = interaction.options.getString('card', true);
-    const shortId = extractShortId(cardOption);
+    await interaction.deferReply({ ephemeral: true });
 
-    if (!shortId) {
-      await interaction.reply({
-        content:
-          'I could not understand that Trello card. Please provide a valid Trello card link or short ID.',
-        ephemeral: true,
-      });
-      setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-      return;
+    const cardInput = interaction.options.getString('card');
+    let cardId = cardInput;
+    if (cardInput.includes('trello.com')) {
+      const match = cardInput.match(/\/c\/([A-Za-z0-9]+)/);
+      if (match) cardId = match[1];
     }
 
-    try {
-      // 1) Mark the Trello card as completed (moves to your completed list etc.)
-      await completeSessionCard(shortId);
-    } catch (err) {
-      console.error('[LOGSESSION] Failed to complete Trello card:', err);
-      await interaction.reply({
-        content:
-          'I could not mark that Trello card as completed. Please check the card and try again.',
-        ephemeral: true,
-      });
-      setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-      return;
-    }
+    const success = await completeSessionCard({ cardId });
 
-    try {
-      // 2) Let the queue manager log attendees (embed with usernames) + clean up queue/attendees messages
-      await onSessionCompleted(shortId, interaction.client);
-    } catch (err) {
-      console.error('[LOGSESSION] onSessionCompleted failed:', err);
+    if (success) {
+      await interaction.editReply(`✅ Session successfully marked as completed on Trello.`);
+    } else {
+      await interaction.editReply(
+        `⚠️ I tried to log that session on Trello, but something went wrong.\nPlease double-check the card link/ID and my Trello configuration.`
+      );
     }
-
-    await interaction.reply({
-      content: '✅ Session has been logged and the queue + attendees messages were cleaned up.',
-      ephemeral: true,
-    });
-    setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
   },
 };
