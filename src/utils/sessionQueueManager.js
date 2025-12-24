@@ -8,16 +8,15 @@ const queues = new Map();
 const ROLE_LIMITS = {
   cohost: 1,
   overseer: 1,
-  interviewer: 12,
+  interviewer: 12,   // Interviewers / Trainers / Attendees depending on type
   spectator: 4,
   supervisor: 4,
 };
 
-// Optional: separate log channel for attendees (embed).
-// If not set, logs fall back to the queue channel.
+// Optional: if you want a separate log channel, set this env var
+// Otherwise, logs fall back to the same queue channel.
 const SESSION_ATTENDEES_LOG_CHANNEL_ID = process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID || null;
 
-// Extract Trello shortId from a URL or raw id
 function extractShortId(cardOption) {
   if (!cardOption) return null;
 
@@ -32,14 +31,13 @@ function extractShortId(cardOption) {
   return null;
 }
 
-// Fetch card using existing trelloRequest helper
 async function fetchCardByShortId(shortId) {
   try {
-    // trelloRequest(method, path, body)
+    // IMPORTANT: method FIRST, then path
     const card = await trelloRequest('GET', `/1/cards/${shortId}`);
 
     if (!card) {
-      console.warn('[TRELLO] No card returned for shortId', shortId);
+      console.warn(`[TRELLO] No card returned for shortId ${shortId}`);
       return null;
     }
 
@@ -50,12 +48,15 @@ async function fetchCardByShortId(shortId) {
   }
 }
 
-function detectSessionType(cardName) {
-  const name = (cardName || '').toLowerCase();
+// Detect session type from both name + description for safety
+function detectSessionType(cardName, cardDesc) {
+  const namePart = (cardName || '').toLowerCase();
+  const descPart = (cardDesc || '').toLowerCase();
+  const text = `${namePart} ${descPart}`;
 
-  if (name.includes('interview')) return 'interview';
-  if (name.includes('training')) return 'training';
-  if (name.includes('mass shift') || name.includes('massshift') || name.includes(' ms ')) return 'massshift';
+  if (text.includes('interview')) return 'interview';
+  if (text.includes('training')) return 'training';
+  if (text.includes('mass shift') || text.includes('massshift') || text.includes(' ms ')) return 'massshift';
 
   return null;
 }
@@ -165,6 +166,7 @@ function upsertQueue(shortId, data) {
     },
   };
 
+  // If caller passed a fresh roles object, override
   if (data.roles) {
     merged.roles = data.roles;
   }
@@ -189,7 +191,7 @@ function addUserToRole(queue, userId, roleKey) {
   }
 
   list.push({ userId, claimedAt: Date.now() });
-  return { ok: true, position: list.length };
+  return { ok: true };
 }
 
 function removeUserFromQueue(queue, userId) {
@@ -211,9 +213,6 @@ function sortRoleEntries(entries) {
   });
 }
 
-/**
- * /sessionqueue handler
- */
 async function openQueueForCard(interaction, cardOption) {
   console.log('[QUEUE] Raw card option:', cardOption);
 
@@ -239,11 +238,11 @@ async function openQueueForCard(interaction, cardOption) {
     return;
   }
 
-  const sessionType = detectSessionType(card.name);
+  const sessionType = detectSessionType(card.name, card.desc);
   if (!sessionType) {
     console.log('[QUEUE] Could not detect session type for card:', card.name);
     await interaction.editReply({
-      content: 'I could not detect the session type from that card. Make sure the card name includes Interview, Training, or Mass Shift.',
+      content: 'I could not detect the session type from that card. Make sure the card name or description includes Interview, Training, or Mass Shift.',
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -336,7 +335,7 @@ async function openQueueForCard(interaction, cardOption) {
   );
 
   const embed = new EmbedBuilder()
-    .setDescription(descriptionLines.filter(Boolean).join('\n'))
+    .setDescription(descriptionLines.join('\n'))
     .setColor(cfg.color || 0x6cb2eb);
 
   const joinRow = new ActionRowBuilder().addComponents(
@@ -349,13 +348,7 @@ async function openQueueForCard(interaction, cardOption) {
       .setLabel('Overseer')
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId(
-        sessionType === 'training'
-          ? `queue_join_interviewer_${shortId}` // reused as "Trainer"
-          : sessionType === 'massshift'
-            ? `queue_join_interviewer_${shortId}` // reused as "Attendee"
-            : `queue_join_interviewer_${shortId}`, // Interviewer
-      )
+      .setCustomId(`queue_join_interviewer_${shortId}`)
       .setLabel(
         sessionType === 'training'
           ? 'Trainer'
@@ -418,8 +411,6 @@ async function openQueueForCard(interaction, cardOption) {
   await interaction.editReply({ content: confirmText });
   setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
 }
-
-/* -------------------- LIVE ATTENDEES MESSAGE -------------------- */
 
 function buildLiveAttendeesMessage(queue) {
   const sorted = {
@@ -512,13 +503,12 @@ async function postLiveAttendeesForQueue(client, queue) {
   const content = buildLiveAttendeesMessage(queue);
   const message = await channel.send({ content });
 
-  // Store attendees message id so we can clean it up later
+  // store attendees message id so we can clean it up later
   queue.attendeesMessageId = message.id;
   queues.set(queue.shortId, queue);
 }
 
-/* -------------------- LOG EMBED (USERNAMES ONLY) -------------------- */
-
+// LOG embed in the log channel, usernames only (no pings)
 async function logAttendeesForCard(client, cardOptionOrShortId) {
   const shortId = extractShortId(cardOptionOrShortId);
   if (!shortId) {
@@ -551,7 +541,7 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
     const results = [];
     for (const entry of entries) {
       try {
-        const user = await client.users.fetch(entry.userId);
+        const user = await logChannel.client.users.fetch(entry.userId);
         results.push(user.username);
       } catch {
         results.push(`Unknown (${entry.userId})`);
@@ -650,8 +640,7 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
   await logChannel.send({ embeds: [logEmbed] });
 }
 
-/* -------------------- CLEANUP QUEUE + ATTENDEES -------------------- */
-
+// Clean up queue + attendees posts and forget the queue
 async function cleanupQueueForCard(client, cardOptionOrShortId) {
   const shortId = extractShortId(cardOptionOrShortId);
   if (!shortId) return;
@@ -683,12 +672,10 @@ async function cleanupQueueForCard(client, cardOptionOrShortId) {
   queues.delete(shortId);
 }
 
-/* -------------------- BUTTON HANDLER -------------------- */
-
 async function handleQueueButtonInteraction(interaction) {
   const customId = interaction.customId;
 
-  // First: handle cancel-session log decision buttons
+  // first: handle cancel-session log decision buttons
   if (customId.startsWith('cancel_log_')) {
     const parts = customId.split('_'); // cancel_log_yes_<shortId> or cancel_log_no_<shortId>
     const decision = parts[2];
@@ -732,7 +719,7 @@ async function handleQueueButtonInteraction(interaction) {
     return;
   }
 
-  // Then: handle queue_* buttons
+  // then: handle queue_* buttons
   if (!customId.startsWith('queue_')) return;
 
   const parts = customId.split('_');
@@ -773,7 +760,7 @@ async function handleQueueButtonInteraction(interaction) {
           : roleKey.charAt(0).toUpperCase() + roleKey.slice(1);
 
       await interaction.reply({
-        content: `You have been added to the **${roleLabel}** queue. You are currently **#${addResult.position}** in this queue.`,
+        content: `You have been added to the **${roleLabel}** queue.`,
         ephemeral: true,
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
@@ -813,7 +800,7 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      // Only host can close
+      // Only host can close (or you can later relax this)
       if (queue.hostId && interaction.user.id !== queue.hostId) {
         await interaction.reply({
           content: 'Only the host can close this queue.',
@@ -850,7 +837,7 @@ async function handleQueueButtonInteraction(interaction) {
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
 
-      // ONLY post live attendees here (no logging)
+      // Only post LIVE attendees here, do NOT log.
       await postLiveAttendeesForQueue(interaction.client, queue);
       return;
     }
@@ -864,8 +851,6 @@ async function handleQueueButtonInteraction(interaction) {
     }
   }
 }
-
-/* -------------------- /sessionattendees COMMAND HELPER -------------------- */
 
 async function postAttendeesForCard(interaction, cardOption) {
   console.log('[SESSIONATTENDEES] Requested attendees for card option:', cardOption);
@@ -896,6 +881,7 @@ async function postAttendeesForCard(interaction, cardOption) {
   });
   setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
 
+  // Again: only LIVE attendees message, no log
   await postLiveAttendeesForQueue(interaction.client, queue);
 }
 
