@@ -239,13 +239,12 @@ async function openQueueForCard(interaction, cardOption) {
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
-
   const card = await fetchCardByShortId(shortId);
   if (!card) {
     console.log('[QUEUE] Could not fetch Trello card for shortId:', shortId);
-    await interaction.editReply({
+    await interaction.reply({
       content: 'I could not fetch that Trello card. Make sure it exists and I can access it.',
+      ephemeral: true,
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -254,8 +253,9 @@ async function openQueueForCard(interaction, cardOption) {
   const sessionType = detectSessionType(card.name);
   if (!sessionType) {
     console.log('[QUEUE] Could not detect session type for card:', card.name);
-    await interaction.editReply({
+    await interaction.reply({
       content: 'I could not detect the session type from that card. Make sure the card name includes Interview, Training, or Mass Shift.',
+      ephemeral: true,
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -264,8 +264,9 @@ async function openQueueForCard(interaction, cardOption) {
   const cfg = getSessionConfig(sessionType);
   if (!cfg || !cfg.queueChannelId) {
     console.log('[QUEUE] Missing channel config for session type:', sessionType);
-    await interaction.editReply({
+    await interaction.reply({
       content: `I am missing a queue channel configuration for **${sessionType}**. Please check your environment variables.`,
+      ephemeral: true,
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -274,8 +275,9 @@ async function openQueueForCard(interaction, cardOption) {
   const queueChannel = await interaction.client.channels.fetch(cfg.queueChannelId).catch(() => null);
   if (!queueChannel) {
     console.log('[QUEUE] Could not fetch queue channel:', cfg.queueChannelId);
-    await interaction.editReply({
+    await interaction.reply({
       content: 'I could not access the configured queue channel. Please check my permissions.',
+      ephemeral: true,
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -374,7 +376,7 @@ async function openQueueForCard(interaction, cardOption) {
   const channelMention = `<#${queueChannel.id}>`;
   const confirmText = `✅ Opened queue for **${card.name}** in ${channelMention}`;
 
-  await interaction.editReply({ content: confirmText });
+  await interaction.reply({ content: confirmText, ephemeral: true });
   setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
 }
 
