@@ -1,6 +1,10 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const { trelloRequest } = require('./trelloClient');
 
+// Trello credentials (used only for shortLink lookup here)
+const TRELLO_KEY = process.env.TRELLO_KEY;
+const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+
 // In-memory registry of active queues, keyed by Trello card shortId.
 const queues = new Map();
 
@@ -32,18 +36,34 @@ function extractShortId(cardOption) {
 }
 
 async function fetchCardByShortId(shortId) {
-  try {
-    // IMPORTANT: path first, then method (matches how /addsession, /cancelsession, /logsession work)
-    const card = await trelloRequest(`/1/cards/${shortId}`, 'GET');
+  if (!shortId) {
+    console.error('[TRELLO] fetchCardByShortId called with empty shortId');
+    return null;
+  }
 
-    if (!card) {
-      console.warn(`[TRELLO] No card returned for shortId ${shortId}`);
+  if (!TRELLO_KEY || !TRELLO_TOKEN) {
+    console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN env vars');
+    return null;
+  }
+
+  try {
+    const url = new URL(`https://api.trello.com/1/cards/${encodeURIComponent(shortId)}`);
+    url.searchParams.set('key', TRELLO_KEY);
+    url.searchParams.set('token', TRELLO_TOKEN);
+
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error('[TRELLO] fetchCardByShortId error', res.status, text || '(no body)');
       return null;
     }
 
+    const card = await res.json();
+    console.log('[TRELLO] Fetched card by shortId', shortId, '→', card.id, card.name);
     return card;
   } catch (error) {
-    console.error('[TRELLO] API error while fetching card', error);
+    console.error('[TRELLO] fetchCardByShortId network error', error);
     return null;
   }
 }
