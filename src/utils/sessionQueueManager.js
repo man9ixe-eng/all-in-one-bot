@@ -1,4 +1,5 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const { trelloRequest } = require('./trelloClient');
 
 // In-memory registry of active queues, keyed by Trello card shortId.
 const queues = new Map();
@@ -31,25 +32,12 @@ function extractShortId(cardOption) {
   return null;
 }
 
-// Fetch card directly from Trello using global fetch
+// Fetch card using existing trelloRequest helper
 async function fetchCardByShortId(shortId) {
   try {
-    const key = process.env.TRELLO_API_KEY;
-    const token = process.env.TRELLO_TOKEN;
-    if (!key || !token) {
-      console.warn('[TRELLO] Missing API key or token in environment.');
-      return null;
-    }
+    // trelloRequest(method, path, body)
+    const card = await trelloRequest('GET', `/1/cards/${shortId}`);
 
-    const url = `https://api.trello.com/1/cards/${shortId}?key=${key}&token=${token}`;
-
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.error('[TRELLO] API error while fetching card:', res.status, await res.text());
-      return null;
-    }
-
-    const card = await res.json();
     if (!card) {
       console.warn('[TRELLO] No card returned for shortId', shortId);
       return null;
