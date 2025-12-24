@@ -33,8 +33,14 @@ function extractShortId(cardOption) {
 
 async function fetchCardByShortId(shortId) {
   try {
-    // IMPORTANT: method is "GET", path is "/1/cards/shortId"
-    const card = await trelloRequest('GET', `/1/cards/${shortId}`);
+    // IMPORTANT: path first, then method (matches how /addsession, /cancelsession, /logsession work)
+    const card = await trelloRequest(`/1/cards/${shortId}`, 'GET');
+
+    if (!card) {
+      console.warn(`[TRELLO] No card returned for shortId ${shortId}`);
+      return null;
+    }
+
     return card;
   } catch (error) {
     console.error('[TRELLO] API error while fetching card', error);
