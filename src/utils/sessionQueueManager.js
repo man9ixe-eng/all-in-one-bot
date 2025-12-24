@@ -1,25 +1,39 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
-const { trelloRequest } = require('./trelloClient');
+const { trelloRequest } = require('./trelloClient'); // still imported for consistency, but we use direct fetch here.
 
-// Trello credentials (used only for shortLink lookup here)
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 
 // In-memory registry of active queues, keyed by Trello card shortId.
 const queues = new Map();
 
-// Limits for each role in the queue.
-const ROLE_LIMITS = {
-  cohost: 1,
-  overseer: 1,
-  interviewer: 12,
-  spectator: 4,
-  supervisor: 4,
+// How many SLOTS we want to pick when the queue closes.
+// (Join is unlimited; selection uses these caps.)
+const ROLE_SLOTS = {
+  interview: {
+    cohost: 1,
+    overseer: 1,
+    interviewer: 12,
+    spectator: 4,
+  },
+  training: {
+    cohost: 1,
+    overseer: 1,
+    supervisor: 4,
+    interviewer: 8, // "Trainer"
+    spectator: 4,
+  },
+  massshift: {
+    cohost: 1,
+    overseer: 1,
+    interviewer: 15, // "Attendees"
+  },
 };
 
-// Optional: if you want a separate log channel, set this env var
-// Otherwise, logs fall back to the same queue channel.
+// Logs channel (simple embed, usernames only)
 const SESSION_ATTENDEES_LOG_CHANNEL_ID = process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID || null;
+// Live ping channel (Selected Attendees). Fallback = queue channel.
+const SESSION_ATTENDEES_CHANNEL_ID = process.env.SESSION_ATTENDEES_CHANNEL_ID || null;
 
 function extractShortId(cardOption) {
   if (!cardOption) return null;
@@ -35,12 +49,12 @@ function extractShortId(cardOption) {
   return null;
 }
 
+// Fetch a Trello card by shortLink using direct HTTP, so we don't fight trelloRequest's method/path shape.
 async function fetchCardByShortId(shortId) {
   if (!shortId) {
     console.error('[TRELLO] fetchCardByShortId called with empty shortId');
     return null;
   }
-
   if (!TRELLO_KEY || !TRELLO_TOKEN) {
     console.error('[TRELLO] Missing TRELLO_KEY or TRELLO_TOKEN env vars');
     return null;
@@ -52,7 +66,6 @@ async function fetchCardByShortId(shortId) {
     url.searchParams.set('token', TRELLO_TOKEN);
 
     const res = await fetch(url);
-
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       console.error('[TRELLO] fetchCardByShortId error', res.status, text || '(no body)');
@@ -81,25 +94,31 @@ function detectSessionType(cardName) {
 function getSessionConfig(sessionType) {
   if (sessionType === 'interview') {
     return {
-      typeLabel: 'INTERVIEW',
+      typeLabel: 'Interview',
       queueChannelId: process.env.SESSION_QUEUECHANNEL_INTERVIEW_ID,
       pingRoleId: process.env.SESSION_QUEUE_PING_INTERVIEW_ROLE_ID,
+      color: 0xffc107, // yellow-ish
+      gameLink: 'https://www.roblox.com/games/71896062227595/GH-Interview-Center',
     };
   }
 
   if (sessionType === 'training') {
     return {
-      typeLabel: 'TRAINING',
+      typeLabel: 'Training',
       queueChannelId: process.env.SESSION_QUEUECHANNEL_TRAINING_ID,
       pingRoleId: process.env.SESSION_QUEUE_PING_TRAINING_ROLE_ID,
+      color: 0xe74c3c, // red-ish
+      gameLink: 'https://www.roblox.com/games/88554128028552/GH-Training-Center',
     };
   }
 
   if (sessionType === 'massshift') {
     return {
-      typeLabel: 'MASS SHIFT',
+      typeLabel: 'Mass Shift',
       queueChannelId: process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID,
       pingRoleId: process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID,
+      color: 0x9b59b6, // purple
+      gameLink: 'https://www.roblox.com/games/127619749760478/Glace-Hotels-BETA-V1',
     };
   }
 
@@ -134,7 +153,7 @@ function extractHostFromDesc(desc, fallbackName) {
 
 function extractTimeFromName(cardName) {
   if (!cardName) return null;
-  // [Interview] 10:50 AM EST - Man9ixe
+  // [Interview] 10:50 PM EST - Man9ixe
   const match = cardName.match(/\]\s*(.+?)\s*-\s*[^-]+$/);
   if (match) {
     return match[1].trim();
@@ -142,18 +161,11 @@ function extractTimeFromName(cardName) {
   return null;
 }
 
-function formatMinutesUntil(dueString) {
+function getDueTimestamp(dueString) {
   if (!dueString) return null;
   const due = new Date(dueString);
   if (Number.isNaN(due.getTime())) return null;
-
-  const now = new Date();
-  const diffMs = due.getTime() - now.getTime();
-  const diffMinutes = Math.round(diffMs / 60000);
-
-  if (diffMinutes <= 0) return 'Starting now';
-  if (diffMinutes === 1) return 'in 1 minute';
-  return `in ${diffMinutes} minutes`;
+  return Math.floor(due.getTime() / 1000);
 }
 
 function upsertQueue(shortId, data) {
@@ -169,17 +181,17 @@ function upsertQueue(shortId, data) {
     cardUrl: data.cardUrl || existing.cardUrl,
     timeText: data.timeText || existing.timeText,
     due: data.due || existing.due || null,
+    openedAt: data.openedAt || existing.openedAt || Date.now(),
     isClosed: data.isClosed !== undefined ? data.isClosed : (existing.isClosed || false),
     roles: existing.roles || {
       cohost: [],
       overseer: [],
+      supervisor: [],
       interviewer: [],
       spectator: [],
-      supervisor: [],
     },
   };
 
-  // If caller passed a fresh roles object, override
   if (data.roles) {
     merged.roles = data.roles;
   }
@@ -195,16 +207,21 @@ function addUserToRole(queue, userId, roleKey) {
     if (idx !== -1) entries.splice(idx, 1);
   }
 
-  const list = queue.roles[roleKey];
-  if (!list) return { ok: false, reason: 'Invalid role.' };
-
-  const limit = ROLE_LIMITS[roleKey] ?? Infinity;
-  if (list.length >= limit) {
-    return { ok: false, reason: 'That role is already full.' };
+  if (!queue.roles[roleKey]) {
+    queue.roles[roleKey] = [];
   }
 
+  const list = queue.roles[roleKey];
+
+  // Unlimited join – capacity handled only when selecting final attendees.
   list.push({ userId, claimedAt: Date.now() });
-  return { ok: true };
+  const position = list.findIndex(e => e.userId === userId) + 1;
+
+  return {
+    ok: true,
+    position,
+    totalInRole: list.length,
+  };
 }
 
 function removeUserFromQueue(queue, userId) {
@@ -224,6 +241,194 @@ function sortRoleEntries(entries) {
     if (a.claimedAt && b.claimedAt) return a.claimedAt - b.claimedAt;
     return 0;
   });
+}
+
+// Build the big queue embed description using your templates per type.
+function buildQueueDescription(sessionType, cfg, queueInfo) {
+  const { hostName, dueTs, cardName, cardUrl } = queueInfo;
+
+  const startsRel = dueTs ? `<t:${dueTs}:R>` : 'Unknown';
+  const startsExact = dueTs ? `<t:${dueTs}:t>` : 'Unknown';
+
+  if (sessionType === 'interview') {
+    return [
+      '╔══════════════════════════════════════╗',
+      `                         🟡 ${cardName} 🟡`,
+      '╚══════════════════════════════════════╝',
+      '',
+      `📌  Host: ${hostName}`,
+      `📌 Starts: ${startsRel}`,
+      `📌 Time: ${startsExact}`,
+      '',
+      '💠 ROLES 💠',
+      '----------------------------------------------------------------',
+      'ℹ️  **Co-Host:** Corporate Intern+',
+      'ℹ️  **Overseer:** Executive Manager+',
+      'ℹ️  **Interviewers (12):** Leadership Intern+',
+      'ℹ️  **Spectators (4):** Leadership Intern+',
+      '',
+      '❓  HOW TO JOIN THE QUEUE ❓',
+      '----------------------------------------------------------------',
+      '- Check the role list above — if your rank is allowed, press the role button you want.',
+      '- You’ll get a popup that says: “You have been added to the (ROLE) Queue, # in queue.”',
+      '- Do NOT join until you are pinged in **Session Attendees** 15 minutes before the session starts.',
+      '- Line up on the number/role you are selected for on "Session Attendees".',
+      '- You have 5 minutes after Session Attendees is posted to join.',
+      '',
+      '❓ HOW TO LEAVE THE QUEUE/INFORM LATE ARRIVAL ❓',
+      '----------------------------------------------------------------',
+      '- Click the "Leave Queue" button, which will show up once you join the queue.',
+      '- You can only leave the queue BEFORE the session list is posted. After that, go to #session-lounge and ping your host to un-queue.',
+      '- If you do not let the host know anything before **5 minutes** after an attendees post was made, you may receive a **Written Warning**, and your spot could be given up.',
+      '----------------------------------------------------------------',
+      '╭─────── 💠 LINKS 💠 ───────────╮',
+      `〰️ Trello Card: ${cardUrl}`,
+      '╰─────────────────────────────╯',
+    ].join('\n');
+  }
+
+  if (sessionType === 'training') {
+    return [
+      '╔══════════════════════════════════════╗',
+      `                             🔴  ${cardName}  🔴`,
+      '╚══════════════════════════════════════╝',
+      '',
+      `📌  Host: ${hostName}`,
+      `📌 Starts: ${startsRel}`,
+      `📌 Time: ${startsExact}`,
+      '',
+      '💠 ROLES 💠',
+      '----------------------------------------------------------------',
+      'ℹ️  **Co-Host:** Corporate Intern+',
+      'ℹ️  **Overseer:** Executive Manager+',
+      'ℹ️  **Supervisors (4):** Assistant Manager+',
+      'ℹ️  **Trainers (8):** Leadership Intern+',
+      'ℹ️  **Spectators (4):** Leadership Intern+',
+      '',
+      '❓  HOW TO JOIN THE QUEUE ❓',
+      '----------------------------------------------------------------',
+      '- Check the role list above — if your rank is allowed, press the role button you want.',
+      '- You’ll get a popup that says: “You have been added to the (ROLE) Queue, # in queue.”',
+      '- Do NOT join until you are pinged in **Session Attendees** 15 minutes before the session starts.',
+      '- Line up on the number/role you are selected for on "Session Attendees".',
+      '- You have 5 minutes after Session Attendees is posted to join.',
+      '',
+      '❓ HOW TO LEAVE THE QUEUE/INFORM LATE ARRIVAL ❓',
+      '----------------------------------------------------------------',
+      '- Click the "Leave Queue" button, which will show up once you join the queue.',
+      '- You can only leave the queue BEFORE the session list is posted. After that, go to #session-lounge and ping your host to un-queue.',
+      '- If you do not let the host know anything before **5 minutes** after an attendees post was made, you may receive a **Written Warning**, and your spot could be given up.',
+      '----------------------------------------------------------------',
+      '╭─────── 💠 LINKS 💠 ───────────╮',
+      `〰️ Trello Card: ${cardUrl}`,
+      '╰─────────────────────────────╯',
+    ].join('\n');
+  }
+
+  if (sessionType === 'massshift') {
+    return [
+      '╔══════════════════════════════════════╗',
+      `                         🟣  ${cardName}  🟣`,
+      '╚══════════════════════════════════════╝',
+      '',
+      `📌  Host: ${hostName}`,
+      `📌 Starts: ${startsRel}`,
+      `📌 Time: ${startsExact}`,
+      '',
+      '💠 ROLES 💠',
+      '----------------------------------------------------------------',
+      'ℹ️  **Co-Host:** Corporate Intern+',
+      'ℹ️  **Overseer:** Executive Manager+',
+      'ℹ️  **Attendees (15):** Leadership Intern+',
+      '',
+      '❓  HOW TO JOIN THE QUEUE ❓',
+      '----------------------------------------------------------------',
+      '- Check the role list above — if your rank is allowed, press the role button you want.',
+      '- You’ll get a popup that says: “You have been added to the (ROLE) Queue, # in queue.”',
+      '- Do NOT join until you are pinged in **Session Attendees** 15 minutes before the session starts.',
+      '- Line up on the number/role you are selected for on "Session Attendees".',
+      '- You have 5 minutes after Session Attendees is posted to join.',
+      '',
+      '❓ HOW TO LEAVE THE QUEUE/INFORM LATE ARRIVAL ❓',
+      '----------------------------------------------------------------',
+      '- Click the "Leave Queue" button, which will show up once you join the queue.',
+      '- You can only leave the queue BEFORE the session list is posted. After that, go to #session-lounge and ping your host to un-queue.',
+      '- If you do not let the host know anything before **5 minutes** after an attendees post was made, you may receive a **Written Warning**, and your spot could be given up.',
+      '----------------------------------------------------------------',
+      '╭─────── 💠 LINKS 💠 ───────────╮',
+      `〰️ Trello Card: ${cardUrl}`,
+      '╰─────────────────────────────╯',
+    ].join('\n');
+  }
+
+  return `${cardName}\n${cardUrl}`;
+}
+
+function buildJoinRows(sessionType, shortId) {
+  const joinRow = new ActionRowBuilder();
+  // Common basic roles
+  joinRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`queue_join_cohost_${shortId}`)
+      .setLabel('Co-Host')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`queue_join_overseer_${shortId}`)
+      .setLabel('Overseer')
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  if (sessionType === 'training') {
+    joinRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`queue_join_supervisor_${shortId}`)
+        .setLabel('Supervisor')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`queue_join_interviewer_${shortId}`)
+        .setLabel('Trainer')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`queue_join_spectator_${shortId}`)
+        .setLabel('Spectator')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  } else if (sessionType === 'interview') {
+    joinRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`queue_join_interviewer_${shortId}`)
+        .setLabel('Interviewer')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`queue_join_spectator_${shortId}`)
+        .setLabel('Spectator')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`queue_join_supervisor_${shortId}`)
+        .setLabel('Supervisor')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  } else if (sessionType === 'massshift') {
+    joinRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`queue_join_interviewer_${shortId}`)
+        .setLabel('Attendee')
+        .setStyle(ButtonStyle.Success),
+    );
+  }
+
+  const controlRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`queue_leave_${shortId}`)
+      .setLabel('Leave Queue')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`queue_close_${shortId}`)
+      .setLabel('Close Queue & Post Attendees')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  return { joinRow, controlRow };
 }
 
 async function openQueueForCard(interaction, cardOption) {
@@ -285,63 +490,21 @@ async function openQueueForCard(interaction, cardOption) {
 
   const { hostName, hostId } = extractHostFromDesc(card.desc, card.name);
   const timeText = extractTimeFromName(card.name);
-  const startsIn = formatMinutesUntil(card.due);
+  const dueTs = getDueTimestamp(card.due);
   const cardUrl = card.shortUrl || card.url || cardOption;
 
-  const headerTop = '╔══════════════════════════════════════╗';
-  const headerTitle = `🟡 ${cfg.typeLabel} | ${hostName || 'Host'} | ${timeText || 'Time'} 🟡`;
-  const headerBottom = '╚══════════════════════════════════════╝';
-
-  const descriptionLines = [
-    headerTop,
-    headerTitle,
-    headerBottom,
-    '',
-    hostId ? `🧊 Host: <@${hostId}>` : `🧊 Host: ${hostName || 'Unknown'}`,
-    timeText ? `🧊 Time: ${timeText}` : null,
-    startsIn ? `🧊 Starts: ${startsIn}` : null,
-    '',
-    '────────────',
-    '',
-    '🧊 Use the buttons below to join the queue.',
-    '🧊 You may only hold **one** spot in the queue.',
-    '',
-    `🔗 Trello Card: ${cardUrl}`,
-  ].filter(Boolean);
+  const description = buildQueueDescription(sessionType, cfg, {
+    hostName,
+    dueTs,
+    cardName: card.name,
+    cardUrl,
+  });
 
   const embed = new EmbedBuilder()
-    .setDescription(descriptionLines.join('\n'))
-    .setColor(0x6cb2eb);
+    .setDescription(description)
+    .setColor(cfg.color || 0x6cb2eb);
 
-  const joinRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`queue_join_cohost_${shortId}`)
-      .setLabel('Co-Host')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`queue_join_overseer_${shortId}`)
-      .setLabel('Overseer')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`queue_join_interviewer_${shortId}`)
-      .setLabel('Interviewer')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`queue_join_spectator_${shortId}`)
-      .setLabel('Spectator')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`queue_leave_${shortId}`)
-      .setLabel('Leave Queue')
-      .setStyle(ButtonStyle.Danger),
-  );
-
-  const controlRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`queue_close_${shortId}`)
-      .setLabel('Close Queue & Post Attendees')
-      .setStyle(ButtonStyle.Danger),
-  );
+  const { joinRow, controlRow } = buildJoinRows(sessionType, shortId);
 
   const messagePayload = {
     content: cfg.pingRoleId ? `<@&${cfg.pingRoleId}>` : null,
@@ -361,12 +524,13 @@ async function openQueueForCard(interaction, cardOption) {
     cardUrl,
     timeText,
     due: card.due || null,
+    openedAt: Date.now(),
     roles: {
       cohost: [],
       overseer: [],
+      supervisor: [],
       interviewer: [],
       spectator: [],
-      supervisor: [],
     },
     isClosed: false,
   });
@@ -402,18 +566,10 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      const addResult = addUserToRole(queue, interaction.user.id, roleKey);
-      if (!addResult.ok) {
-        await interaction.reply({
-          content: addResult.reason,
-          ephemeral: true,
-        });
-        setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
-      }
+      const result = addUserToRole(queue, interaction.user.id, roleKey);
 
       await interaction.reply({
-        content: `You have been added to the **${roleKey.replace(/^(.)/, (m) => m.toUpperCase())}** queue.`,
+        content: `You have been added to the **${roleKey.charAt(0).toUpperCase() + roleKey.slice(1)}** queue.\nYou are #${result.position} in this queue.\nCurrently **${result.totalInRole}** people are in this queue.`,
         ephemeral: true,
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
@@ -423,9 +579,9 @@ async function handleQueueButtonInteraction(interaction) {
     if (action === 'leave') {
       const shortId = parts[2];
       const queue = queues.get(shortId);
-      if (!queue) {
+      if (!queue || queue.isClosed) {
         await interaction.reply({
-          content: 'This queue is no longer active.',
+          content: 'This queue is locked or no longer active. Please contact the host if you need to be removed.',
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
@@ -453,7 +609,7 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      // Only host can close (or you can later relax this)
+      // Only host can close (if hostId is known)
       if (queue.hostId && interaction.user.id !== queue.hostId) {
         await interaction.reply({
           content: 'Only the host can close this queue.',
@@ -504,90 +660,186 @@ async function handleQueueButtonInteraction(interaction) {
   }
 }
 
-function buildLiveAttendeesMessage(queue) {
-  const sorted = {
-    cohost: sortRoleEntries(queue.roles.cohost),
-    overseer: sortRoleEntries(queue.roles.overseer),
-    interviewer: sortRoleEntries(queue.roles.interviewer),
-    spectator: sortRoleEntries(queue.roles.spectator),
-    supervisor: sortRoleEntries(queue.roles.supervisor),
+// Select final attendees per role based purely on first-come for now.
+function selectAttendees(queue) {
+  const slots = ROLE_SLOTS[queue.sessionType] || {};
+  const selected = {
+    cohost: [],
+    overseer: [],
+    supervisor: [],
+    interviewer: [],
+    spectator: [],
   };
 
-  const headerTop = '╔══════════════════════════════════════╗';
-  const headerTitle = '                             ✅  SELECTED ATTENDEES ✅';
-  const headerBottom = '╚══════════════════════════════════════╝';
-
-  const lines = [
-    headerTop,
-    headerTitle,
-    headerBottom,
-    '',
-    queue.hostId ? `🧊 Host: <@${queue.hostId}>` : `🧊 Host: ${queue.hostName || 'Unknown'}`,
-    sorted.cohost[0] ? `🧊 Co-Host: <@${sorted.cohost[0].userId}>` : '🧊 Co-Host: None selected',
-    sorted.overseer[0] ? `🧊 Overseer: <@${sorted.overseer[0].userId}>` : '🧊 Overseer: None selected',
-    '',
-    '────────────',
-    '',
-  ];
-
-  lines.push('🟡  Interviewers 🟡');
-  if (sorted.interviewer.length === 0) {
-    lines.push('None selected.');
-  } else {
-    sorted.interviewer.forEach((entry, idx) => {
-      lines.push(`${idx + 1}. <@${entry.userId}>`);
-    });
+  for (const roleKey of Object.keys(selected)) {
+    const entries = sortRoleEntries(queue.roles[roleKey] || []);
+    const limit = slots[roleKey] ?? entries.length;
+    selected[roleKey] = entries.slice(0, limit);
   }
 
-  lines.push('');
-  lines.push('────────────');
-  lines.push('');
-  lines.push('⚪  Spectators ⚪');
-  if (sorted.spectator.length === 0) {
-    lines.push('None selected.');
-  } else {
-    sorted.spectator.forEach((entry, idx) => {
-      lines.push(`${idx + 1}. <@${entry.userId}>`);
-    });
+  return selected;
+}
+
+// Build the Selected Attendees message text (with pings) per type.
+function buildAttendeesContent(queue, selected, sessionType, cfg) {
+  const hostLine = queue.hostId
+    ? `🧊 Host: <@${queue.hostId}>`
+    : `🧊 Host: ${queue.hostName || 'Unknown'}`;
+
+  const cohostLine = selected.cohost[0]
+    ? `🧊 Co-Host: <@${selected.cohost[0].userId}>`
+    : '🧊 Co-Host: None selected';
+
+  const overseerLine = selected.overseer[0]
+    ? `🧊 Overseer: <@${selected.overseer[0].userId}>`
+    : '🧊 Overseer: None selected';
+
+  const gameLink = cfg.gameLink || '';
+
+  if (sessionType === 'interview') {
+    const interviewerLines = [];
+    for (let i = 0; i < 12; i++) {
+      const entry = selected.interviewer[i];
+      interviewerLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
+
+    const spectatorLines = [];
+    for (let i = 0; i < 4; i++) {
+      const entry = selected.spectator[i];
+      spectatorLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
+
+    return [
+      '╔══════════════════════════════════════╗',
+      '                              ✅  SELECTED ATTENDEES ✅',
+      '╚══════════════════════════════════════╝',
+      '',
+      hostLine,
+      cohostLine,
+      overseerLine,
+      '',
+      '────────────',
+      '',
+      '🟡  Interviewers 🟡',
+      ...interviewerLines,
+      '',
+      '────────────',
+      '',
+      '⚪  Spectators ⚪',
+      ...spectatorLines,
+      '',
+      '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+      '🧊 Failure to join on time will result in a **written warning**. :(',
+      gameLink ? gameLink : '',
+    ].join('\n');
   }
 
-  if (sorted.supervisor.length > 0) {
-    lines.push('');
-    lines.push('🔵  Supervisors 🔵');
-    sorted.supervisor.forEach((entry, idx) => {
-      lines.push(`${idx + 1}. <@${entry.userId}>`);
-    });
+  if (sessionType === 'training') {
+    const trainerLines = [];
+    for (let i = 0; i < 8; i++) {
+      const entry = selected.interviewer[i];
+      trainerLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
+
+    const spectatorLines = [];
+    for (let i = 0; i < 4; i++) {
+      const entry = selected.spectator[i];
+      spectatorLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
+
+    const supervisorLines = [];
+    for (let i = 0; i < 4; i++) {
+      const entry = selected.supervisor[i];
+      supervisorLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
+
+    return [
+      '╔══════════════════════════════════════╗',
+      '                              ✅  SELECTED ATTENDEES ✅',
+      '╚══════════════════════════════════════╝',
+      '',
+      hostLine,
+      cohostLine,
+      overseerLine,
+      '',
+      '────────────',
+      '',
+      '🔵  Supervisors 🔵',
+      ...supervisorLines,
+      '',
+      '────────────',
+      '',
+      '🔴  Trainers 🔴',
+      ...trainerLines,
+      '',
+      '────────────',
+      '',
+      '⚪  Spectators ⚪',
+      ...spectatorLines,
+      '',
+      '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+      '🧊 Failure to join on time will result in a **written warning**. :(',
+      gameLink ? gameLink : '',
+    ].join('\n');
   }
 
-  lines.push('');
-  lines.push('🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.');
-  lines.push('🧊 Failure to join on time will result in a **written warning**. :(');
+  if (sessionType === 'massshift') {
+    const attendeeLines = [];
+    for (let i = 0; i < 15; i++) {
+      const entry = selected.interviewer[i];
+      attendeeLines.push(`${i + 1}. ${entry ? `<@${entry.userId}>` : ''}`);
+    }
 
-  return lines.join('\n');
+    return [
+      '╔══════════════════════════════════════╗',
+      '                              ✅  SELECTED ATTENDEES ✅',
+      '╚══════════════════════════════════════╝',
+      '',
+      hostLine,
+      cohostLine,
+      overseerLine,
+      '',
+      '────────────',
+      '',
+      '🟣  Attendees  🟣',
+      ...attendeeLines,
+      '',
+      '────────────',
+      '',
+      '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
+      '🧊 Failure to join on time will result in a **written warning**. :(',
+      gameLink ? gameLink : '',
+    ].join('\n');
+  }
+
+  return 'Selected attendees.';
 }
 
 async function sendAttendeesForQueue(client, queue) {
-  if (!queue || !queue.channelId) return;
+  if (!queue) return;
 
-  const channel = await client.channels.fetch(queue.channelId).catch(() => null);
-  if (!channel) return;
+  const cfg = getSessionConfig(queue.sessionType) || {};
+  const selected = selectAttendees(queue);
 
-  const content = buildLiveAttendeesMessage(queue);
+  // LIVE "Selected Attendees" post (with pings) → Session Attendees channel or queue channel.
+  const liveChannelId = SESSION_ATTENDEES_CHANNEL_ID || queue.channelId;
+  const liveChannel = await client.channels.fetch(liveChannelId).catch(() => null);
+  if (liveChannel) {
+    const content = buildAttendeesContent(queue, selected, queue.sessionType, cfg);
+    await liveChannel.send({ content });
+  }
 
-  // LIVE post in the queue channel (with pings)
-  await channel.send({ content });
-
-  // Also log to the configured log channel (embed, usernames only, NO pings)
-  const logChannelId = SESSION_ATTENDEES_LOG_CHANNEL_ID || queue.channelId;
+  // LOG embed (usernames only, no pings) → SESSION_ATTENDEES_LOG_CHANNEL_ID or same as live.
+  const logChannelId = SESSION_ATTENDEES_LOG_CHANNEL_ID || liveChannelId;
   const logChannel = await client.channels.fetch(logChannelId).catch(() => null);
   if (!logChannel) return;
 
   const sorted = {
-    cohost: sortRoleEntries(queue.roles.cohost),
-    overseer: sortRoleEntries(queue.roles.overseer),
-    interviewer: sortRoleEntries(queue.roles.interviewer),
-    spectator: sortRoleEntries(queue.roles.spectator),
-    supervisor: sortRoleEntries(queue.roles.supervisor),
+    cohost: sortRoleEntries(selected.cohost),
+    overseer: sortRoleEntries(selected.overseer),
+    supervisor: sortRoleEntries(selected.supervisor),
+    interviewer: sortRoleEntries(selected.interviewer),
+    spectator: sortRoleEntries(selected.spectator),
   };
 
   async function usernamesFromEntries(entries) {
@@ -603,20 +855,26 @@ async function sendAttendeesForQueue(client, queue) {
     return results;
   }
 
-  const [cohostNames, overseerNames, interviewerNames, spectatorNames, supervisorNames] =
-    await Promise.all([
-      usernamesFromEntries(sorted.cohost),
-      usernamesFromEntries(sorted.overseer),
-      usernamesFromEntries(sorted.interviewer),
-      usernamesFromEntries(sorted.spectator),
-      usernamesFromEntries(sorted.supervisor),
-    ]);
+  const [
+    cohostNames,
+    overseerNames,
+    supervisorNames,
+    interviewerNames,
+    spectatorNames,
+  ] = await Promise.all([
+    usernamesFromEntries(sorted.cohost),
+    usernamesFromEntries(sorted.overseer),
+    usernamesFromEntries(sorted.supervisor),
+    usernamesFromEntries(sorted.interviewer),
+    usernamesFromEntries(sorted.spectator),
+  ]);
 
   const fields = [];
 
   fields.push({
     name: 'Session Info',
     value: [
+      queue.sessionType ? `• **Type:** ${queue.sessionType}` : null,
       queue.cardName ? `• **Card:** ${queue.cardName}` : null,
       queue.timeText ? `• **Time:** ${queue.timeText}` : null,
       queue.cardUrl ? `• **Trello:** ${queue.cardUrl}` : null,
@@ -641,8 +899,22 @@ async function sendAttendeesForQueue(client, queue) {
     inline: true,
   });
 
+  if (queue.sessionType === 'training') {
+    fields.push({
+      name: 'Supervisors',
+      value: supervisorNames.length ? supervisorNames.map((n, i) => `${i + 1}. ${n}`).join('\n') : 'None',
+    });
+  }
+
+  const roleLabel =
+    queue.sessionType === 'training'
+      ? 'Trainers'
+      : queue.sessionType === 'massshift'
+      ? 'Attendees'
+      : 'Interviewers';
+
   fields.push({
-    name: 'Interviewers',
+    name: roleLabel,
     value: interviewerNames.length ? interviewerNames.map((n, i) => `${i + 1}. ${n}`).join('\n') : 'None',
   });
 
@@ -652,14 +924,6 @@ async function sendAttendeesForQueue(client, queue) {
     inline: true,
   });
 
-  if (supervisorNames.length) {
-    fields.push({
-      name: 'Supervisors',
-      value: supervisorNames.map((n, i) => `${i + 1}. ${n}`).join('\n'),
-      inline: true,
-    });
-  }
-
   const now = new Date();
   const loggedAt = now.toLocaleString('en-US', { timeZone: 'America/Toronto' });
 
@@ -667,7 +931,7 @@ async function sendAttendeesForQueue(client, queue) {
     .setTitle('Session Attendees Logged')
     .setDescription(`Logged at **${loggedAt}**`)
     .addFields(fields)
-    .setColor(0x6cb2eb);
+    .setColor(cfg.color || 0x6cb2eb);
 
   await logChannel.send({ embeds: [logEmbed] });
 }
