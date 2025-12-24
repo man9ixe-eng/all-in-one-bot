@@ -34,10 +34,21 @@ module.exports = {
     const success = await cancelSessionCard({ cardId, reason });
 
     if (success) {
-      await interaction.editReply(`✅ Successfully canceled the session on Trello.`);
+      await interaction.editReply('✅ Successfully canceled the session on Trello.');
+
+      // Prompt about logging attendees AFTER we know it’s cancelled
+      await interaction.followUp({
+        content:
+          'This session has been cancelled.\n' +
+          'Do you want to log attendees for this cancelled session?\n' +
+          '• If **yes**, run `/sessionattendees` with the same Trello card, then `/logsession` (this will also clean up the queue & attendees posts).\n' +
+          '• If **no**, you can ignore this message.',
+        ephemeral: true,
+      });
     } else {
       await interaction.editReply(
-        `⚠️ I tried to cancel that session on Trello, but something went wrong.\nPlease double-check the card link/ID and my Trello configuration.`
+        '⚠️ I tried to cancel that session on Trello, but something went wrong.\n' +
+        'Please double-check the card link/ID and my Trello configuration.'
       );
     }
   },

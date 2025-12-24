@@ -1,5 +1,5 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
-const { trelloRequest } = require('./trelloClient'); // still imported for consistency, but we use direct fetch here.
+const { trelloRequest } = require('./trelloClient'); // kept for consistency, but direct fetch used for card fetch
 
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
@@ -49,7 +49,7 @@ function extractShortId(cardOption) {
   return null;
 }
 
-// Fetch a Trello card by shortLink using direct HTTP, so we don't fight trelloRequest's method/path shape.
+// Fetch a Trello card by shortLink using direct HTTP.
 async function fetchCardByShortId(shortId) {
   if (!shortId) {
     console.error('[TRELLO] fetchCardByShortId called with empty shortId');
@@ -190,10 +190,14 @@ function upsertQueue(shortId, data) {
       interviewer: [],
       spectator: [],
     },
+    attendeesMessages: existing.attendeesMessages || [], // [{ channelId, messageId }]
   };
 
   if (data.roles) {
     merged.roles = data.roles;
+  }
+  if (data.attendeesMessages) {
+    merged.attendeesMessages = data.attendeesMessages;
   }
 
   queues.set(shortId, merged);
@@ -826,7 +830,14 @@ async function sendAttendeesForQueue(client, queue) {
   const liveChannel = await client.channels.fetch(liveChannelId).catch(() => null);
   if (liveChannel) {
     const content = buildAttendeesContent(queue, selected, queue.sessionType, cfg);
-    await liveChannel.send({ content });
+    const liveMessage = await liveChannel.send({ content });
+
+    queue.attendeesMessages = queue.attendeesMessages || [];
+    queue.attendeesMessages.push({
+      channelId: liveChannel.id,
+      messageId: liveMessage.id,
+    });
+    queues.set(queue.shortId, queue);
   }
 
   // LOG embed (usernames only, no pings) → SESSION_ATTENDEES_LOG_CHANNEL_ID or same as live.
@@ -968,8 +979,49 @@ async function postAttendeesForCard(interaction, cardOption) {
   await sendAttendeesForQueue(interaction.client, queue);
 }
 
+// NEW: cleanup helper used by /logsession to delete queue + attendees posts.
+async function cleanupQueueForCard(client, cardOption) {
+  const shortId = extractShortId(cardOption);
+  if (!shortId) return false;
+
+  const queue = queues.get(shortId);
+  if (!queue) return false;
+
+  // Delete queue message
+  if (queue.channelId && queue.messageId) {
+    try {
+      const ch = await client.channels.fetch(queue.channelId).catch(() => null);
+      if (ch) {
+        const msg = await ch.messages.fetch(queue.messageId).catch(() => null);
+        if (msg) await msg.delete().catch(() => {});
+      }
+    } catch (err) {
+      console.error('[QUEUE] Error deleting queue message for', shortId, err);
+    }
+  }
+
+  // Delete all attendees messages we know about
+  if (Array.isArray(queue.attendeesMessages)) {
+    for (const entry of queue.attendeesMessages) {
+      try {
+        const ch = await client.channels.fetch(entry.channelId).catch(() => null);
+        if (!ch) continue;
+        const msg = await ch.messages.fetch(entry.messageId).catch(() => null);
+        if (msg) await msg.delete().catch(() => {});
+      } catch (err) {
+        console.error('[QUEUE] Error deleting attendees message for', shortId, err);
+      }
+    }
+  }
+
+  queues.delete(shortId);
+  console.log('[QUEUE] Cleaned up queue and attendees messages for card', shortId);
+  return true;
+}
+
 module.exports = {
   openQueueForCard,
   handleQueueButtonInteraction,
   postAttendeesForCard,
+  cleanupQueueForCard,
 };
