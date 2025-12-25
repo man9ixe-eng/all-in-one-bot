@@ -62,7 +62,6 @@ module.exports = {
       return;
     }
 
-    // Ask if they want to log attendees for this cancelled session
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`cancel_log_yes_${shortId}`)

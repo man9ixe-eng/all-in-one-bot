@@ -22,7 +22,7 @@ module.exports = {
 
     const cardInput = interaction.options.getString('card');
 
-    // Extract Trello ID (short link) from full URL or plain ID
+    // Extract Trello short ID from full URL or plain ID
     let cardId = cardInput;
     if (cardInput.includes('trello.com')) {
       const match = cardInput.match(/\/c\/([A-Za-z0-9]+)/);
@@ -38,7 +38,6 @@ module.exports = {
       return;
     }
 
-    // Log attendees based on the queue (priority already applied by queue system)
     try {
       await logAttendeesForCard(interaction.client, cardInput);
       await cleanupQueueForCard(interaction.client, cardInput);
