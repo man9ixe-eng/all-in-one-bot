@@ -1,4 +1,3 @@
-// src/utils/sessionQueueManager.js
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -40,8 +39,9 @@ function extractShortId(cardOption) {
 
 async function fetchCardByShortId(shortId) {
   try {
-    // IMPORTANT: method FIRST, then path (this matches how your other Trello helpers call trelloRequest)
-    const card = await trelloRequest('GET', `/1/cards/${shortId}`);
+    // IMPORTANT: your trelloRequest is (path, method, params?)
+    // So we must pass path FIRST, then 'GET'.
+    const card = await trelloRequest(`/1/cards/${shortId}`, 'GET');
 
     if (!card) {
       console.warn(`[TRELLO] No card returned for shortId ${shortId}`);
@@ -867,7 +867,7 @@ async function handleQueueButtonInteraction(interaction) {
         return;
       }
 
-      // Only host can close (you can relax this later if you want)
+      // Only host can close (you can relax this later)
       if (queue.hostId && interaction.user.id !== queue.hostId) {
         await interaction.reply({
           content: 'Only the host can close this queue.',
