@@ -5,11 +5,11 @@ const { openQueueForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionqueue')
-    .setDescription('Open a queue for a Trello session card.')
+    .setDescription('Open a session queue for a Trello card.')
     .addStringOption((option) =>
       option
         .setName('card')
-        .setDescription('Full Trello card URL (with /c/...)')
+        .setDescription('Trello card URL or short ID')
         .setRequired(true),
     ),
 

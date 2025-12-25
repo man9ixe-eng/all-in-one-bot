@@ -5,11 +5,11 @@ const { postAttendeesForCard } = require('../../utils/sessionQueueManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('sessionattendees')
-    .setDescription('Post the selected attendees for a session (LIVE message).')
+    .setDescription('Post the selected attendees list for a session queue.')
     .addStringOption((option) =>
       option
         .setName('card')
-        .setDescription('Full Trello card URL (with /c/...)')
+        .setDescription('Trello card URL or short ID')
         .setRequired(true),
     ),
 

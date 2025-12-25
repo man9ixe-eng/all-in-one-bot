@@ -13,7 +13,7 @@ module.exports = {
     .addStringOption((option) =>
       option
         .setName('card')
-        .setDescription('Trello card URL or short ID')
+        .setDescription('Trello card URL or ID')
         .setRequired(true),
     ),
 
@@ -22,38 +22,32 @@ module.exports = {
 
     const cardInput = interaction.options.getString('card');
 
-    // Extract Trello ID or shortlink for Trello API
+    // Extract Trello ID (short link) from full URL or plain ID
     let cardId = cardInput;
     if (cardInput.includes('trello.com')) {
       const match = cardInput.match(/\/c\/([A-Za-z0-9]+)/);
       if (match) cardId = match[1];
     }
 
-    // 1) Log attendees (if any queue exists for this card)
-    try {
-      await logAttendeesForCard(interaction.client, cardInput);
-    } catch (err) {
-      console.error('[LOGSESSION] Failed to log attendees for card', err);
-    }
-
-    // 2) Clean up queue & attendees posts
-    try {
-      await cleanupQueueForCard(interaction.client, cardInput);
-    } catch (err) {
-      console.error('[LOGSESSION] Failed to cleanup queue for card', err);
-    }
-
-    // 3) Mark Trello card as completed
     const success = await completeSessionCard({ cardId });
 
-    if (success) {
+    if (!success) {
       await interaction.editReply(
-        '✅ Session successfully marked as completed on Trello.\nAttendees (if any) were logged and the session queue messages were cleaned up.',
+        '⚠️ I tried to log that session on Trello, but something went wrong.\nPlease double-check the card link/ID and my Trello configuration.',
       );
-    } else {
-      await interaction.editReply(
-        '⚠️ I tried to mark that session as completed on Trello, but something went wrong.\nIf a queue existed, attendees were still logged and queue messages were cleaned up.',
-      );
+      return;
     }
+
+    // Log attendees based on the queue (priority already applied by queue system)
+    try {
+      await logAttendeesForCard(interaction.client, cardInput);
+      await cleanupQueueForCard(interaction.client, cardInput);
+    } catch (err) {
+      console.error('[LOGSESSION] Error while logging/cleaning queue:', err);
+    }
+
+    await interaction.editReply(
+      '✅ Session successfully marked as completed on Trello.\n✅ Attendees logged and queue messages cleaned up.',
+    );
   },
 };

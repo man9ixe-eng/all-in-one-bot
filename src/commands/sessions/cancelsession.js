@@ -14,7 +14,7 @@ module.exports = {
     .addStringOption((option) =>
       option
         .setName('card')
-        .setDescription('Trello card URL or short ID')
+        .setDescription('Trello card URL or ID')
         .setRequired(true),
     )
     .addStringOption((option) =>
@@ -31,11 +31,26 @@ module.exports = {
     const reason =
       interaction.options.getString('reason') || 'No reason provided.';
 
-    // Extract Trello ID or shortlink for Trello API
+    // Extract Trello ID / short link
     let cardId = cardInput;
+    let shortId = null;
+
     if (cardInput.includes('trello.com')) {
       const match = cardInput.match(/\/c\/([A-Za-z0-9]+)/);
-      if (match) cardId = match[1];
+      if (match) {
+        cardId = match[1];
+        shortId = match[1];
+      }
+    } else {
+      const match = cardInput.match(/^([A-Za-z0-9]{6,10})$/);
+      if (match) {
+        cardId = match[1];
+        shortId = match[1];
+      }
+    }
+
+    if (!shortId) {
+      shortId = cardId;
     }
 
     const success = await cancelSessionCard({ cardId, reason });
@@ -47,31 +62,21 @@ module.exports = {
       return;
     }
 
-    // Trello cancellation successful -> ask if we should log attendees & cleanup.
-    const shortIdMatch = cardInput.match(/trello\.com\/c\/([A-Za-z0-9]+)/);
-    const shortId = shortIdMatch ? shortIdMatch[1] : null;
-
-    if (!shortId) {
-      await interaction.editReply(
-        '✅ Successfully canceled the session on Trello.\nHowever, I could not detect the card short ID from your link, so I cannot offer attendee logging for this cancelled session.',
-      );
-      return;
-    }
-
+    // Ask if they want to log attendees for this cancelled session
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`cancel_log_yes_${shortId}`)
-        .setLabel('✅ Yes, log attendees & clean up')
+        .setLabel('Yes, log attendees')
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(`cancel_log_no_${shortId}`)
-        .setLabel('🧹 No, just clean up')
+        .setLabel('No, just clean up')
         .setStyle(ButtonStyle.Secondary),
     );
 
     await interaction.editReply({
       content:
-        '✅ This session has been **cancelled** on Trello.\nDo you want to log the attendees for this cancelled session as well?',
+        '✅ Session has been cancelled on Trello.\nDo you want to log attendees for this cancelled session?',
       components: [row],
     });
   },
