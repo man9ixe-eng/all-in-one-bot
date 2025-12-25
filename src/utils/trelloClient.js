@@ -148,7 +148,7 @@ async function createSessionCard({
     idList: listId,
     name,
     desc: descLines.join('\n'),
-    pos: 'top',
+    pos: 'bottom',
     due: dueISO || null,
   };
 
