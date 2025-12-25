@@ -1,3 +1,4 @@
+// src/commands/sessions/cancelsession.js
 const {
   SlashCommandBuilder,
   ActionRowBuilder,
@@ -5,19 +6,18 @@ const {
   ButtonStyle,
 } = require('discord.js');
 const { cancelSessionCard } = require('../../utils/trelloClient');
-const { extractShortId } = require('../../utils/sessionQueueManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('cancelsession')
     .setDescription('Cancel a Trello session card.')
-    .addStringOption(option =>
+    .addStringOption((option) =>
       option
         .setName('card')
-        .setDescription('Trello card URL or ID')
+        .setDescription('Trello card URL or short ID')
         .setRequired(true),
     )
-    .addStringOption(option =>
+    .addStringOption((option) =>
       option
         .setName('reason')
         .setDescription('Reason for cancellation')
@@ -28,16 +28,15 @@ module.exports = {
     await interaction.deferReply({ ephemeral: true });
 
     const cardInput = interaction.options.getString('card');
-    const reason = interaction.options.getString('reason') || 'No reason provided.';
+    const reason =
+      interaction.options.getString('reason') || 'No reason provided.';
 
-    // Extract Trello ID or shortlink
+    // Extract Trello ID or shortlink for Trello API
     let cardId = cardInput;
     if (cardInput.includes('trello.com')) {
       const match = cardInput.match(/\/c\/([A-Za-z0-9]+)/);
       if (match) cardId = match[1];
     }
-
-    const shortId = extractShortId(cardInput) || cardId;
 
     const success = await cancelSessionCard({ cardId, reason });
 
@@ -48,9 +47,17 @@ module.exports = {
       return;
     }
 
-    await interaction.editReply('✅ Successfully canceled the session on Trello.');
+    // Trello cancellation successful -> ask if we should log attendees & cleanup.
+    const shortIdMatch = cardInput.match(/trello\.com\/c\/([A-Za-z0-9]+)/);
+    const shortId = shortIdMatch ? shortIdMatch[1] : null;
 
-    // Ask if they want to log attendees for this cancelled session
+    if (!shortId) {
+      await interaction.editReply(
+        '✅ Successfully canceled the session on Trello.\nHowever, I could not detect the card short ID from your link, so I cannot offer attendee logging for this cancelled session.',
+      );
+      return;
+    }
+
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`cancel_log_yes_${shortId}`)
@@ -58,18 +65,14 @@ module.exports = {
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(`cancel_log_no_${shortId}`)
-        .setLabel('🚫 No, just clean up')
+        .setLabel('🧹 No, just clean up')
         .setStyle(ButtonStyle.Secondary),
     );
 
-    await interaction.followUp({
+    await interaction.editReply({
       content:
-        'This session has been cancelled.\n' +
-        'Do you want to log attendees for this cancelled session?\n' +
-        '• **Yes** – I will log attendees into the log channel and delete the queue + attendees posts.\n' +
-        '• **No** – I will just delete the queue + attendees posts.',
+        '✅ This session has been **cancelled** on Trello.\nDo you want to log the attendees for this cancelled session as well?',
       components: [row],
-      ephemeral: true,
     });
   },
 };
