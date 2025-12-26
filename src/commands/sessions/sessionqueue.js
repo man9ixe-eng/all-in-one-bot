@@ -37,4 +37,3 @@ module.exports = {
     await openQueueForCard(interaction, cardOption);
   },
 };
-z
