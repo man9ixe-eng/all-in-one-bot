@@ -11,32 +11,31 @@ const { trelloRequest } = require('./trelloClient');
 // In-memory registry of active queues, keyed by Trello card shortId.
 const queues = new Map();
 
-// Base limits per role; interviewer gets overridden per sessionType.
+// Base limits for each role; interviewer is adjusted per sessionType if needed.
 const ROLE_LIMITS = {
   cohost: 1,
   overseer: 1,
-  interviewer: 12, // default (Interviews)
+  interviewer: 12, // default (Interviewers)
   spectator: 4,
   supervisor: 4,
 };
 
-// Optional log channel for attendees; falls back to queue channel if unset.
+// Optional: if you want a separate log channel, set this env var.
+// Otherwise, logs fall back to the same queue channel.
 const SESSION_ATTENDEES_LOG_CHANNEL_ID =
   process.env.SESSION_ATTENDEES_LOG_CHANNEL_ID || null;
 
 /**
- * Extract Trello shortId from either:
- *  - Full URL, e.g. https://trello.com/c/abcd1234/123-name
- *  - Raw shortId, e.g. abcd1234
+ * Extract Trello shortId from:
+ *  - Full URL: https://trello.com/c/abcd1234/123-name
+ *  - Raw shortId: abcd1234
  */
 function extractShortId(cardOption) {
   if (!cardOption) return null;
 
-  // Full Trello URL
   const urlMatch = cardOption.match(/trello\.com\/c\/([a-zA-Z0-9]+)/);
   if (urlMatch) return urlMatch[1];
 
-  // ShortId alone
   const idMatch = cardOption.match(/^([a-zA-Z0-9]{6,10})$/);
   if (idMatch) return idMatch[1];
 
@@ -45,7 +44,7 @@ function extractShortId(cardOption) {
 
 /**
  * Fetch full card data for a Trello shortId.
- * NOTE: trelloRequest(path, method, params?) → path FIRST, method SECOND.
+ * trelloRequest(path, method, params?)
  */
 async function fetchCardByShortId(shortId) {
   try {
@@ -62,27 +61,26 @@ async function fetchCardByShortId(shortId) {
 }
 
 /**
- * Detects session type by looking at BOTH card name and description.
- * Expects things like:
- *  - "[Interview] 7:00 AM EST - Man9ixe"
- *  - "Session Type: Interview" in desc
+ * Detect session type from card name + description.
+ * Handles:
+ *  - "[Interview] ...", "Session Type: Interview"
+ *  - "[Training] ...", "Session Type: Training"
+ *  - "[Mass Shift] ...", "Session Type: Mass Shift"
  */
-function detectSessionType(card) {
-  if (!card) return null;
-
-  const name = (card.name || '').toLowerCase();
-  const desc = (card.desc || '').toLowerCase();
+function detectSessionType(cardName, cardDesc) {
+  const name = (cardName || '').toLowerCase();
+  const desc = (cardDesc || '').toLowerCase();
   const text = `${name}\n${desc}`;
 
   if (text.includes('interview')) return 'interview';
   if (text.includes('training')) return 'training';
 
-  // Be generous with Mass Shift spelling
   if (
     text.includes('mass shift') ||
+    text.includes('massshift') ||
     text.includes('mass-shift') ||
     text.includes('mass  shift') ||
-    text.includes('massshift')
+    text.includes(' ms ')
   ) {
     return 'massshift';
   }
@@ -91,18 +89,8 @@ function detectSessionType(card) {
 }
 
 /**
- * Config per sessionType:
- *  - label text
- *  - color
- *  - queue channel
- *  - ping role
- *
- * For massshift we support either:
- *  - SESSION_QUEUECHANNEL_MASSSHIFT_ID
- *  - SESSION_QUEUECHANNEL_MASS_SHIFT_ID
- * and:
- *  - SESSION_QUEUE_PING_MASSSHIFT_ROLE_ID
- *  - SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID
+ * Session-type configuration.
+ * Mass Shift tries multiple possible env names so it’s harder to misconfigure.
  */
 function getSessionConfig(sessionType) {
   if (sessionType === 'interview') {
@@ -128,11 +116,15 @@ function getSessionConfig(sessionType) {
       typeLabel: 'MASS SHIFT',
       color: 0x9c27b0,
       queueChannelId:
-        process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID ||
-        process.env.SESSION_QUEUECHANNEL_MASS_SHIFT_ID,
+        process.env.SESSION_QUEUECHANNEL_MASSSHIFT_ID || // old style
+        process.env.SESSION_QUEUECHANNEL_MASS_SHIFT_ID || // with underscore
+        process.env.SESSION_QUEUECHANNEL_MASSHIFT_ID || // typo-safe
+        null,
       pingRoleId:
         process.env.SESSION_QUEUE_PING_MASSSHIFT_ROLE_ID ||
-        process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID,
+        process.env.SESSION_QUEUE_PING_MASS_SHIFT_ROLE_ID ||
+        process.env.SESSION_QUEUE_PING_MASSHIFT_ROLE_ID ||
+        null,
     };
   }
 
@@ -140,9 +132,9 @@ function getSessionConfig(sessionType) {
 }
 
 /**
- * Extract host from description:
- *  "Host: man9ixe (5258907...)"
- * falls back to parsing " - Host" from card name.
+ * Extract host from card description:
+ *  "Host: name (123456789012345678)"
+ * Fallback: last " - Name" part from card name.
  */
 function extractHostFromDesc(desc, fallbackName) {
   if (typeof desc !== 'string') desc = '';
@@ -169,7 +161,7 @@ function extractHostFromDesc(desc, fallbackName) {
 }
 
 /**
- * Extract the time from card name:
+ * Extract the "time" part from:
  *  "[Interview] 10:50 AM EST - Man9ixe" → "10:50 AM EST"
  */
 function extractTimeFromName(cardName) {
@@ -182,7 +174,7 @@ function extractTimeFromName(cardName) {
 }
 
 /**
- * Pretty “starts in X minutes” string from Trello due date.
+ * Format a "starts in X minutes" string from Trello due date.
  */
 function formatMinutesUntil(dueString) {
   if (!dueString) return null;
@@ -236,14 +228,14 @@ function upsertQueue(shortId, data) {
 }
 
 /**
- * Add a user to a role within a queue, respecting limits.
- * Interviewer limit varies by session type:
+ * Add a user to a specific role, respecting limits.
+ * Interviewer limit varies by sessionType:
  *  - Interview: 12
- *  - Training: 8
- *  - Mass Shift: 15
+ *  - Training: 8 (Trainers)
+ *  - Mass Shift: 15 (Attendees)
  */
 function addUserToRole(queue, userId, roleKey) {
-  // Remove from any existing role first (only 1 slot per queue)
+  // Remove from any existing role first
   for (const entries of Object.values(queue.roles)) {
     const idx = entries.findIndex((entry) => entry.userId === userId);
     if (idx !== -1) entries.splice(idx, 1);
@@ -252,17 +244,14 @@ function addUserToRole(queue, userId, roleKey) {
   const list = queue.roles[roleKey];
   if (!list) return { ok: false, reason: 'Invalid role.' };
 
-  // Base limit
   let limit = ROLE_LIMITS[roleKey] ?? Infinity;
 
-  // Special per-type limits for the main role
   if (roleKey === 'interviewer') {
     if (queue.sessionType === 'training') {
       limit = 8;
     } else if (queue.sessionType === 'massshift') {
       limit = 15;
     }
-    // default (interview) stays 12
   }
 
   if (list.length >= limit) {
@@ -274,7 +263,7 @@ function addUserToRole(queue, userId, roleKey) {
 }
 
 /**
- * Remove user from any role they had in this queue.
+ * Remove a user from any role they had in this queue.
  */
 function removeUserFromQueue(queue, userId) {
   let removed = false;
@@ -289,7 +278,7 @@ function removeUserFromQueue(queue, userId) {
 }
 
 /**
- * Sort entries by claimedAt (oldest first).
+ * Sort role entries by claim time.
  */
 function sortRoleEntries(entries) {
   return [...entries].sort((a, b) => {
@@ -328,7 +317,7 @@ async function openQueueForCard(interaction, cardOption) {
     return;
   }
 
-  const sessionType = detectSessionType(card);
+  const sessionType = detectSessionType(card.name, card.desc);
   if (!sessionType) {
     console.log('[QUEUE] Could not detect session type for card:', card.name);
     await interaction.editReply({
@@ -346,7 +335,7 @@ async function openQueueForCard(interaction, cardOption) {
     await interaction.editReply({
       content:
         `I am missing a queue channel configuration for **${sessionType}**.\n` +
-        'Please check your environment variables.',
+        'Please check your environment variables for the Mass Shift queue channel / ping role.',
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -359,7 +348,7 @@ async function openQueueForCard(interaction, cardOption) {
     console.log('[QUEUE] Could not fetch queue channel:', cfg.queueChannelId);
     await interaction.editReply({
       content:
-        'I could not access the configured queue channel. Please check my permissions.',
+        'I could not access the configured queue channel. Please check my permissions and the channel ID.',
     });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
     return;
@@ -439,7 +428,9 @@ async function openQueueForCard(interaction, cardOption) {
     .setDescription(descriptionLines.filter(Boolean).join('\n'))
     .setColor(cfg.color || 0x6cb2eb);
 
-  const joinRow = new ActionRowBuilder().addComponents(
+  // Build buttons; for Mass Shift we do not really need spectator, but we keep
+  // it consistent by still using the same internal "interviewer" slot for Attendees.
+  const joinRowComponents = [
     new ButtonBuilder()
       .setCustomId(`queue_join_cohost_${shortId}`)
       .setLabel('Co-Host')
@@ -449,13 +440,7 @@ async function openQueueForCard(interaction, cardOption) {
       .setLabel('Overseer')
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId(
-        sessionType === 'training'
-          ? `queue_join_interviewer_${shortId}` // Trainer
-          : sessionType === 'massshift'
-          ? `queue_join_interviewer_${shortId}` // Attendee
-          : `queue_join_interviewer_${shortId}`, // Interviewer
-      )
+      .setCustomId(`queue_join_interviewer_${shortId}`)
       .setLabel(
         sessionType === 'training'
           ? 'Trainer'
@@ -464,15 +449,26 @@ async function openQueueForCard(interaction, cardOption) {
           : 'Interviewer',
       )
       .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`queue_join_spectator_${shortId}`)
-      .setLabel('Spectator')
-      .setStyle(ButtonStyle.Secondary),
+  ];
+
+  // Only show Spectator button for non-MassShift types
+  if (sessionType !== 'massshift') {
+    joinRowComponents.push(
+      new ButtonBuilder()
+        .setCustomId(`queue_join_spectator_${shortId}`)
+        .setLabel('Spectator')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+
+  joinRowComponents.push(
     new ButtonBuilder()
       .setCustomId(`queue_leave_${shortId}`)
       .setLabel('Leave Queue')
       .setStyle(ButtonStyle.Danger),
   );
+
+  const joinRow = new ActionRowBuilder().addComponents(joinRowComponents);
 
   const controlRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -524,7 +520,7 @@ async function openQueueForCard(interaction, cardOption) {
 }
 
 /**
- * Build the live "Selected Attendees" text for the queue channel.
+ * Build the live "Selected Attendees" text message.
  */
 function buildLiveAttendeesMessage(queue) {
   const sorted = {
@@ -620,7 +616,7 @@ function buildLiveAttendeesMessage(queue) {
 }
 
 /**
- * Post LIVE attendees into the queue channel (with pings).
+ * LIVE attendees post in the queue channel (with pings).
  */
 async function postLiveAttendeesForQueue(client, queue) {
   if (!queue || !queue.channelId) return;
@@ -636,8 +632,7 @@ async function postLiveAttendeesForQueue(client, queue) {
 }
 
 /**
- * Log attendees into a log channel as an embed (usernames, not pings).
- * Called from /logsession and from cancel-session yes/no flow.
+ * Log attendees into the log channel as an embed (usernames only).
  */
 async function logAttendeesForCard(client, cardOptionOrShortId) {
   const shortId = extractShortId(cardOptionOrShortId);
@@ -775,7 +770,7 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
 }
 
 /**
- * Clean up the queue post + attendees post in Discord, and forget the queue.
+ * Clean up queue + attendees posts and forget the queue.
  */
 async function cleanupQueueForCard(client, cardOptionOrShortId) {
   const shortId = extractShortId(cardOptionOrShortId);
@@ -809,12 +804,13 @@ async function cleanupQueueForCard(client, cardOptionOrShortId) {
 }
 
 /**
- * Handles all queue-related button interactions + cancel-log yes/no.
+ * Handle all queue-related button interactions and cancel-log yes/no.
+ * Returns true if this function handled the interaction.
  */
 async function handleQueueButtonInteraction(interaction) {
   const customId = interaction.customId;
 
-  // 1) cancel-session log decision buttons
+  // cancel-session "log this cancelled session?" buttons
   if (customId.startsWith('cancel_log_')) {
     const parts = customId.split('_'); // cancel_log_yes_<shortId> or cancel_log_no_<shortId>
     const decision = parts[2];
@@ -838,7 +834,7 @@ async function handleQueueButtonInteraction(interaction) {
         })
         .catch(() => {});
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-      return;
+      return true;
     }
 
     // decision === 'yes'
@@ -869,11 +865,11 @@ async function handleQueueButtonInteraction(interaction) {
           .catch(() => {});
       }
     }
-    return;
+    return true;
   }
 
-  // 2) queue_* buttons
-  if (!customId.startsWith('queue_')) return;
+  // queue_* buttons (join / leave / close)
+  if (!customId.startsWith('queue_')) return false;
 
   const parts = customId.split('_');
   const action = parts[1];
@@ -890,7 +886,7 @@ async function handleQueueButtonInteraction(interaction) {
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
+        return true;
       }
 
       const addResult = addUserToRole(queue, interaction.user.id, roleKey);
@@ -900,7 +896,7 @@ async function handleQueueButtonInteraction(interaction) {
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
+        return true;
       }
 
       const roleLabel =
@@ -917,7 +913,7 @@ async function handleQueueButtonInteraction(interaction) {
         ephemeral: true,
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-      return;
+      return true;
     }
 
     if (action === 'leave') {
@@ -929,7 +925,7 @@ async function handleQueueButtonInteraction(interaction) {
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
+        return true;
       }
 
       const removed = removeUserFromQueue(queue, interaction.user.id);
@@ -940,7 +936,7 @@ async function handleQueueButtonInteraction(interaction) {
         ephemeral: true,
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-      return;
+      return true;
     }
 
     if (action === 'close') {
@@ -952,17 +948,16 @@ async function handleQueueButtonInteraction(interaction) {
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
+        return true;
       }
 
-      // Only host can close
       if (queue.hostId && interaction.user.id !== queue.hostId) {
         await interaction.reply({
           content: 'Only the host can close this queue.',
           ephemeral: true,
         });
         setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
-        return;
+        return true;
       }
 
       queue.isClosed = true;
@@ -996,9 +991,8 @@ async function handleQueueButtonInteraction(interaction) {
       });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
 
-      // Only post LIVE attendees here; logging happens via /logsession or cancel-session (yes).
       await postLiveAttendeesForQueue(interaction.client, queue);
-      return;
+      return true;
     }
   } catch (error) {
     console.error('[QUEUE] Error handling button interaction:', error);
@@ -1010,11 +1004,14 @@ async function handleQueueButtonInteraction(interaction) {
         })
         .catch(() => {});
     }
+    return true;
   }
+
+  return false;
 }
 
 /**
- * /sessionattendees command – manually post the attendees list.
+ * /sessionattendees – manually post attendees list for a queue.
  */
 async function postAttendeesForCard(interaction, cardOption) {
   console.log(
