@@ -75,25 +75,27 @@ if (fs.existsSync(commandsPathRoot)) {
   }
 }
 
-// ===== READY / DEBUG LOGGING =====
+// ===== EVENTS =====
 
 client.once(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(
+    `[READY] Logged in as ${client.user.tag} (id: ${client.user.id})`,
+  );
 });
 
 client.on('error', (error) => {
-  console.error('Discord client error:', error);
+  console.error('[CLIENT ERROR]', error);
 });
 
 client.on('shardError', (error) => {
-  console.error('Discord shard error:', error);
+  console.error('[SHARD ERROR]', error);
 });
 
-// If you want super-verbose gateway logs, uncomment this:
-// client.on('debug', (m) => console.log('[DEBUG]', m));
+client.on('shardDisconnect', (event, shardId) => {
+  console.warn('[SHARD DISCONNECT]', shardId, event);
+});
 
-// ===== SESSION ANNOUNCEMENTS (TRELLO) =====
-
+// Session announcements: 30 minutes before due (checks every 1 minute)
 setInterval(async () => {
   try {
     console.log('[AUTO] Session announcement tick...');
@@ -103,9 +105,9 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
-// ===== MESSAGE AUTOMOD + PREFIX =====
-
+// MessageCreate: automod + simple prefix command
 client.on('messageCreate', async (message) => {
+  // Run automod first (bad words, spam, etc.)
   try {
     await handleMessageAutomod(message);
   } catch (err) {
@@ -114,19 +116,20 @@ client.on('messageCreate', async (message) => {
 
   if (message.author.bot) return;
 
+  // Simple example prefix command
   if (message.content === '!ping') {
     message.reply('Pong! (prefix command)');
   }
 });
 
-// ===== INTERACTIONS (BUTTONS + SLASH) =====
+// ===== SINGLE InteractionCreate HANDLER (buttons + slash commands) =====
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 1) Buttons – queue system
+    // 1) Button interactions – queue system
     if (interaction.isButton()) {
       const handled = await handleQueueButtonInteraction(interaction);
-      if (handled) return;
+      if (handled) return; // do NOT fall through if we handled it
     }
 
     // 2) Slash commands
@@ -157,20 +160,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ===== GLOBAL UNHANDLED PROMISES =====
+// ===== GLOBAL ERROR HANDLERS =====
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled promise rejection:', reason);
 });
 
-// ===== LOGIN TO DISCORD =====
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
 
-console.log('[LOGIN] Attempting to login to Discord...');
-client
-  .login(process.env.DISCORD_TOKEN)
-  .then(() => {
-    console.log('[LOGIN] Login promise resolved.');
-  })
-  .catch((err) => {
-    console.error('Failed to login to Discord:', err);
-  });
+// ===== LOGIN TO DISCORD (with extra logging) =====
+
+(async () => {
+  console.log('[LOGIN] Starting Discord login...');
+
+  const token = process.env.DISCORD_TOKEN;
+
+  if (!token) {
+    console.error(
+      '[LOGIN] DISCORD_TOKEN is MISSING or EMPTY in Render environment variables.',
+    );
+    return;
+  }
+
+  console.log(
+    '[LOGIN] DISCORD_TOKEN is set. Length:',
+    String(token).length,
+  );
+
+  try {
+    await client.login(token.trim());
+    console.log('[LOGIN] client.login() promise resolved (login OK).');
+  } catch (err) {
+    console.error('[LOGIN] Failed to login to Discord:', err);
+  }
+})();
