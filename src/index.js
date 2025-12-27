@@ -77,7 +77,6 @@ if (fs.existsSync(commandsPathRoot)) {
 
 // ===== EVENTS =====
 
-// Ready event
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
@@ -107,8 +106,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ===== InteractionCreate: buttons + slash commands =====
-
+// InteractionCreate: buttons + slash commands
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // 1) Button interactions – queue system
@@ -157,13 +155,22 @@ process.on('unhandledRejection', (reason) => {
 
 // ===== LOGIN TO DISCORD =====
 
-console.log('[LOGIN] Attempting to login to Discord...');
+const token = process.env.DISCORD_TOKEN;
 
-client
-  .login(process.env.DISCORD_TOKEN)
-  .then(() => {
-    console.log('[LOGIN] Login successful.');
-  })
-  .catch((err) => {
-    console.error('Failed to login to Discord:', err);
-  });
+if (!token || typeof token !== 'string' || token.trim().length === 0) {
+  console.error('[LOGIN] DISCORD_TOKEN is missing or empty in this environment. Bot cannot login.');
+} else {
+  console.log(
+    `[LOGIN] DISCORD_TOKEN detected. Length: ${token.trim().length} characters.`,
+  );
+  console.log('[LOGIN] Attempting to login to Discord...');
+
+  client
+    .login(token.trim())
+    .then(() => {
+      console.log('[LOGIN] Login successful.');
+    })
+    .catch((err) => {
+      console.error('Failed to login to Discord:', err);
+    });
+}
