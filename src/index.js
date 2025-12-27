@@ -102,7 +102,7 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   if (message.content === '!ping') {
-    message.reply('Pong! (prefix command)');
+    await message.reply('Pong! (prefix command)');
   }
 });
 
@@ -149,6 +149,10 @@ client.on('error', (error) => {
   console.error('Discord client error:', error);
 });
 
+client.on('shardError', (error) => {
+  console.error('WebSocket shard error:', error);
+});
+
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection:', reason);
 });
@@ -158,15 +162,18 @@ process.on('unhandledRejection', (reason) => {
 const token = process.env.DISCORD_TOKEN;
 
 if (!token || typeof token !== 'string' || token.trim().length === 0) {
-  console.error('[LOGIN] DISCORD_TOKEN is missing or empty in this environment. Bot cannot login.');
+  console.error(
+    '[LOGIN] DISCORD_TOKEN is missing or empty in this environment. Bot cannot login.',
+  );
 } else {
+  const trimmed = token.trim();
   console.log(
-    `[LOGIN] DISCORD_TOKEN detected. Length: ${token.trim().length} characters.`,
+    `[LOGIN] DISCORD_TOKEN detected. Length: ${trimmed.length} characters.`,
   );
   console.log('[LOGIN] Attempting to login to Discord...');
 
   client
-    .login(token.trim())
+    .login(trimmed)
     .then(() => {
       console.log('[LOGIN] Login successful.');
     })
