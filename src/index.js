@@ -96,8 +96,24 @@ client.once(Events.ClientReady, (c) => {
 });
 
 // =======================
+// DEBUG / WARN (TEMP)
+// =======================
+
+client.on('warn', (info) => {
+  console.warn('[DISCORD WARN]', info);
+});
+
+client.on('error', (error) => {
+  console.error('[DISCORD CLIENT ERROR]', error);
+});
+
+// If logs get too spammy, you can comment this out later
+client.on('debug', (info) => {
+  console.log('[DISCORD DEBUG]', info);
+});
+
+// =======================
 // SESSION ANNOUNCEMENTS
-// (runs every 1 minute)
 // =======================
 
 setInterval(async () => {
@@ -162,7 +178,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
     } catch {
-      // ignore follow-up errors
+      // ignore double-reply errors
     }
   }
 });
@@ -170,14 +186,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // =======================
 // GLOBAL ERROR HANDLERS
 // =======================
-
-client.on('error', (error) => {
-  console.error('[DISCORD CLIENT ERROR]', error);
-});
-
-client.on('shardError', (error) => {
-  console.error('[SHARD ERROR]', error);
-});
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[UNHANDLED REJECTION]', reason);
@@ -193,7 +201,6 @@ if (!rawToken) {
   console.error(
     '[LOGIN] DISCORD_TOKEN is missing in environment variables. Bot cannot start.',
   );
-  // Exit so Render shows it as a failed deploy instead of a "running but dead" app
   process.exit(1);
 }
 
@@ -202,12 +209,13 @@ console.log(
   `[LOGIN] DISCORD_TOKEN detected. Length: ${token.length} characters.`,
 );
 
-client
-  .login(token)
-  .then(() => {
-    console.log('[LOGIN] login() promise resolved. Waiting for READY event...');
-  })
-  .catch((err) => {
+(async () => {
+  try {
+    console.log('[LOGIN] Calling client.login()...');
+    await client.login(token);
+    console.log('[LOGIN] client.login() resolved. Waiting for READY event...');
+  } catch (err) {
     console.error('[LOGIN] Failed to login to Discord:', err);
     process.exit(1);
-  });
+  }
+})();
