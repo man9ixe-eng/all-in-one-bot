@@ -16,10 +16,12 @@ const path = require('node:path');
 const { handleMessageAutomod } = require('./utils/automod');
 const { runSessionAnnouncementTick } = require('./utils/sessionAnnouncements');
 const { handleQueueButtonInteraction } = require('./utils/sessionQueueManager');
+const priorityStore = require('./utils/priorityStore');
 
-// =======================
+
+// ===========================
 // HTTP SERVER FOR RENDER
-// =======================
+// ===========================
 
 const PORT = process.env.PORT || 3000;
 
@@ -32,9 +34,9 @@ http
     console.log(`HTTP server listening on port ${PORT}`);
   });
 
-// =======================
+// ===========================
 // DISCORD CLIENT SETUP
-// =======================
+// ===========================
 
 const client = new Client({
   intents: [
@@ -48,11 +50,21 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
+// Priority store (attendance history for fair queues)
+try {
+  priorityStore.load();
+  client.priorityStore = priorityStore;
+  console.log('[PRIORITY] Store loaded.');
+} catch (err) {
+  console.error('[PRIORITY] Failed to load priority store:', err);
+}
+
 client.commands = new Collection();
 
-// =======================
+// ===========================
 // LOAD SLASH COMMANDS
-// =======================
+// (src/commands/**)
+// ===========================
 
 const commandsPathRoot = path.join(__dirname, 'commands');
 
@@ -79,43 +91,38 @@ if (fs.existsSync(commandsPathRoot)) {
       }
     }
   }
-} else {
-  console.warn(
-    `[WARN] Commands folder not found at ${commandsPathRoot}. No commands loaded.`,
-  );
 }
 
-// =======================
-// READY EVENT
-// =======================
+// ===========================
+// EVENTS
+// ===========================
 
+// READY
 client.once(Events.ClientReady, (c) => {
   console.log(
-    `[READY] Logged in as ${c.user.tag} (${c.user.id}). Guilds: ${c.guilds.cache.size}`,
+    `[READY] Logged in as ${c.user.tag} (id: ${c.user.id}) in ${c.guilds.cache.size} guild(s).`,
   );
 });
 
-// =======================
-// DEBUG / WARN (TEMP)
-// =======================
+// Extra debug to see what Discord.js is doing
+// Discord.js debug can be VERY noisy and may leak sensitive info; keep it OFF by default.
+const ENABLE_DISCORD_DEBUG = process.env.ENABLE_DISCORD_DEBUG === 'true';
+if (ENABLE_DISCORD_DEBUG) {
+  client.on('debug', (msg) => {
+    if (typeof msg === 'string' && msg.includes('Provided token')) return;
+    console.log('[DISCORD DEBUG]', msg);
+  });
+}
 
-client.on('warn', (info) => {
-  console.warn('[DISCORD WARN]', info);
+client.on('warn', (msg) => {
+  console.warn('[DISCORD WARN]', msg);
 });
 
-client.on('error', (error) => {
-  console.error('[DISCORD CLIENT ERROR]', error);
+client.on('error', (err) => {
+  console.error('[DISCORD ERROR]', err);
 });
 
-// If logs get too spammy, you can comment this out later
-client.on('debug', (info) => {
-  console.log('[DISCORD DEBUG]', info);
-});
-
-// =======================
-// SESSION ANNOUNCEMENTS
-// =======================
-
+// Session announcements: every 1 minute
 setInterval(async () => {
   try {
     console.log('[AUTO] Session announcement tick...');
@@ -125,11 +132,9 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
-// =======================
-// MESSAGE AUTOMOD + PREFIX
-// =======================
-
+// MESSAGE CREATE: automod + simple prefix ping
 client.on('messageCreate', async (message) => {
+  // Automod first
   try {
     await handleMessageAutomod(message);
   } catch (err) {
@@ -143,16 +148,17 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// =======================
-// INTERACTION HANDLER
-// =======================
+// ===========================
+// INTERACTIONS (BUTTONS + SLASH)
+// ===========================
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 1) Queue buttons
+    // 1) Queue buttons (session queue system)
     if (interaction.isButton()) {
       const handled = await handleQueueButtonInteraction(interaction);
       if (handled) return;
+      // If not handled, fall through in case you add other buttons later
     }
 
     // 2) Slash commands
@@ -183,39 +189,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// =======================
+// ===========================
 // GLOBAL ERROR HANDLERS
-// =======================
+// ===========================
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('[UNHANDLED REJECTION]', reason);
+  console.error('Unhandled promise rejection:', reason);
 });
 
-// =======================
+// ===========================
 // LOGIN TO DISCORD
-// =======================
+// ===========================
 
 const rawToken = process.env.DISCORD_TOKEN;
 
 if (!rawToken) {
   console.error(
-    '[LOGIN] DISCORD_TOKEN is missing in environment variables. Bot cannot start.',
+    '[LOGIN] No DISCORD_TOKEN found in environment. Make sure it is set in Render env vars.',
   );
   process.exit(1);
 }
 
+// Trim whitespace/newlines from env var (very common Render gotcha)
 const token = rawToken.trim();
 console.log(
-  `[LOGIN] DISCORD_TOKEN detected. Length: ${token.length} characters.`,
+  `[LOGIN] DISCORD_TOKEN detected. Raw length: ${rawToken.length}, trimmed length: ${token.length}.`,
 );
 
-(async () => {
-  try {
-    console.log('[LOGIN] Calling client.login()...');
-    await client.login(token);
+client
+  .login(token)
+  .then(() => {
     console.log('[LOGIN] client.login() resolved. Waiting for READY event...');
-  } catch (err) {
+  })
+  .catch((err) => {
     console.error('[LOGIN] Failed to login to Discord:', err);
-    process.exit(1);
-  }
-})();
+  });

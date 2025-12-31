@@ -18,8 +18,12 @@ const ROLE_LIMITS = {
   interviewer: 12, // default (Interviewers)
   spectator: 4,
   supervisor: 4,
+
 };
 
+
+// Safety hard-cap (prevents someone from creating massive queues)
+const QUEUE_ROLE_HARD_CAP = Number(process.env.SESSION_QUEUE_HARD_CAP || 60);
 // Optional: if you want a separate log channel, set this env var.
 // Otherwise, logs fall back to the same queue channel.
 const SESSION_ATTENDEES_LOG_CHANNEL_ID =
@@ -200,6 +204,7 @@ function upsertQueue(shortId, data) {
     sessionType: data.sessionType || existing.sessionType,
     hostId: data.hostId || existing.hostId,
     hostName: data.hostName || existing.hostName,
+    guildId: data.guildId || existing.guildId || null,
     channelId: data.channelId || existing.channelId,
     messageId: data.messageId || existing.messageId,
     attendeesMessageId:
@@ -228,7 +233,7 @@ function upsertQueue(shortId, data) {
 }
 
 /**
- * Add a user to a specific role, respecting limits.
+ * Add a user to a specific role (sign-up). Limits are applied when posting attendees.
  * Interviewer limit varies by sessionType:
  *  - Interview: 12
  *  - Training: 8 (Trainers)
@@ -244,26 +249,24 @@ function addUserToRole(queue, userId, roleKey) {
   const list = queue.roles[roleKey];
   if (!list) return { ok: false, reason: 'Invalid role.' };
 
-  let limit = ROLE_LIMITS[roleKey] ?? Infinity;
-
-  if (roleKey === 'interviewer') {
-    if (queue.sessionType === 'training') {
-      limit = 8;
-    } else if (queue.sessionType === 'massshift') {
-      limit = 15;
+  // We do NOT enforce role limits here anymore.
+  // Instead, we allow sign-ups and apply the limits when we POST attendees
+  // (priority-based selection + backups).
+  if (Number.isFinite(QUEUE_ROLE_HARD_CAP) && QUEUE_ROLE_HARD_CAP > 0) {
+    if (list.length >= QUEUE_ROLE_HARD_CAP) {
+      return {
+        ok: false,
+        reason: 'That queue has reached the hard-cap. Please try again later.',
+      };
     }
-  }
-
-  if (list.length >= limit) {
-    return { ok: false, reason: 'That role is already full.' };
   }
 
   list.push({ userId, claimedAt: Date.now() });
   return { ok: true };
 }
 
-/**
- * Remove a user from any role they had in this queue.
+ /**
+  * Remove a user from any role they had in this queue.
  */
 function removeUserFromQueue(queue, userId) {
   let removed = false;
@@ -278,13 +281,66 @@ function removeUserFromQueue(queue, userId) {
 }
 
 /**
- * Sort role entries by claim time.
+ * Get selection limit for a role based on session type.
  */
-function sortRoleEntries(entries) {
-  return [...entries].sort((a, b) => {
+function getRoleLimit(queue, roleKey) {
+  let limit = ROLE_LIMITS[roleKey] ?? Infinity;
+
+  if (roleKey === 'interviewer') {
+    if (queue.sessionType === 'training') {
+      limit = 8;
+    } else if (queue.sessionType === 'massshift') {
+      limit = 15;
+    } else {
+      limit = 12;
+    }
+  }
+
+  return limit;
+}
+
+/**
+ * Sort role entries:
+ * 1) Priority: users who attended least recently go first (or never attended)
+ * 2) Tie-break: claim time (first come, first served)
+ */
+function sortRoleEntries(entries, priorityStore, guildId) {
+  return [...(entries || [])].sort((a, b) => {
+    const aLast =
+      priorityStore && typeof priorityStore.getLastAttendedAt === 'function'
+        ? priorityStore.getLastAttendedAt(guildId, a.userId)
+        : 0;
+    const bLast =
+      priorityStore && typeof priorityStore.getLastAttendedAt === 'function'
+        ? priorityStore.getLastAttendedAt(guildId, b.userId)
+        : 0;
+
+    if (aLast !== bLast) return aLast - bLast;
+
     if (a.claimedAt && b.claimedAt) return a.claimedAt - b.claimedAt;
     return 0;
   });
+}
+
+function splitSelected(entries, limit, priorityStore, guildId) {
+  const sorted = sortRoleEntries(entries, priorityStore, guildId);
+  const safeLimit = Number.isFinite(limit) ? limit : sorted.length;
+  return {
+    sorted,
+    selected: sorted.slice(0, safeLimit),
+    backups: sorted.slice(safeLimit),
+  };
+}
+
+function formatBackupsLine(backups, maxShow = 10) {
+  if (!backups || backups.length === 0) return null;
+  const shown = backups
+    .slice(0, maxShow)
+    .map((e) => `<@${e.userId}>`)
+    .join(' • ');
+  const extra =
+    backups.length > maxShow ? ` (+${backups.length - maxShow} more)` : '';
+  return `🟠 Backups: ${shown}${extra}`;
 }
 
 /**
@@ -489,6 +545,7 @@ async function openQueueForCard(interaction, cardOption) {
     sessionType,
     hostId,
     hostName,
+    guildId: interaction.guildId,
     channelId: queueMessage.channel.id,
     messageId: queueMessage.id,
     attendeesMessageId: null,
@@ -521,15 +578,43 @@ async function openQueueForCard(interaction, cardOption) {
 
 /**
  * Build the live "Selected Attendees" text message.
+ * Priority rules:
+ * - People who attended least recently are selected first.
+ * - Tie-break: whoever claimed first.
  */
-function buildLiveAttendeesMessage(queue) {
-  const sorted = {
-    cohost: sortRoleEntries(queue.roles.cohost),
-    overseer: sortRoleEntries(queue.roles.overseer),
-    interviewer: sortRoleEntries(queue.roles.interviewer),
-    spectator: sortRoleEntries(queue.roles.spectator),
-    supervisor: sortRoleEntries(queue.roles.supervisor),
-  };
+function buildLiveAttendeesMessage(queue, priorityStore) {
+  const guildId = queue.guildId || 'global';
+
+  const cohost = splitSelected(
+    queue.roles.cohost,
+    getRoleLimit(queue, 'cohost'),
+    priorityStore,
+    guildId,
+  );
+  const overseer = splitSelected(
+    queue.roles.overseer,
+    getRoleLimit(queue, 'overseer'),
+    priorityStore,
+    guildId,
+  );
+  const main = splitSelected(
+    queue.roles.interviewer,
+    getRoleLimit(queue, 'interviewer'),
+    priorityStore,
+    guildId,
+  );
+  const spectator = splitSelected(
+    queue.roles.spectator,
+    getRoleLimit(queue, 'spectator'),
+    priorityStore,
+    guildId,
+  );
+  const supervisor = splitSelected(
+    queue.roles.supervisor,
+    getRoleLimit(queue, 'supervisor'),
+    priorityStore,
+    guildId,
+  );
 
   const headerTop = '╔══════════════════════════════════════╗';
   const headerTitle =
@@ -544,17 +629,23 @@ function buildLiveAttendeesMessage(queue) {
     queue.hostId
       ? `🧊 Host: <@${queue.hostId}>`
       : `🧊 Host: ${queue.hostName || 'Unknown'}`,
-    sorted.cohost[0]
-      ? `🧊 Co-Host: <@${sorted.cohost[0].userId}>`
+    cohost.selected[0]
+      ? `🧊 Co-Host: <@${cohost.selected[0].userId}>`
       : '🧊 Co-Host: None selected',
-    sorted.overseer[0]
-      ? `🧊 Overseer: <@${sorted.overseer[0].userId}>`
+    overseer.selected[0]
+      ? `🧊 Overseer: <@${overseer.selected[0].userId}>`
       : '🧊 Overseer: None selected',
-    '',
-    '────────────',
-    '',
   ];
 
+  const cohostBackups = formatBackupsLine(cohost.backups, 5);
+  if (cohostBackups) lines.push(cohostBackups);
+
+  const overseerBackups = formatBackupsLine(overseer.backups, 5);
+  if (overseerBackups) lines.push(overseerBackups);
+
+  lines.push('', '────────────', '');
+
+  // Main role section (Interviewers / Trainers / Attendees)
   if (queue.sessionType === 'training') {
     lines.push('🔴  Trainers 🔴');
   } else if (queue.sessionType === 'massshift') {
@@ -563,38 +654,50 @@ function buildLiveAttendeesMessage(queue) {
     lines.push('🟡  Interviewers 🟡');
   }
 
-  if (sorted.interviewer.length === 0) {
+  if (main.selected.length === 0) {
     lines.push('None selected.');
   } else {
-    sorted.interviewer.forEach((entry, idx) => {
+    main.selected.forEach((entry, idx) => {
       lines.push(`${idx + 1}. <@${entry.userId}>`);
     });
   }
 
-  lines.push('');
-  lines.push('────────────');
-  lines.push('');
+  const mainBackups = formatBackupsLine(main.backups, 12);
+  if (mainBackups) lines.push(mainBackups);
 
+  // Spectators (not used for mass shift)
   if (queue.sessionType !== 'massshift') {
-    lines.push('⚪  Spectators ⚪');
-    if (sorted.spectator.length === 0) {
+    lines.push('', '🔵  Spectators 🔵');
+
+    if (spectator.selected.length === 0) {
       lines.push('None selected.');
     } else {
-      sorted.spectator.forEach((entry, idx) => {
+      spectator.selected.forEach((entry, idx) => {
         lines.push(`${idx + 1}. <@${entry.userId}>`);
       });
     }
 
-    if (sorted.supervisor.length > 0) {
-      lines.push('');
-      lines.push('🔵  Supervisors 🔵');
-      sorted.supervisor.forEach((entry, idx) => {
-        lines.push(`${idx + 1}. <@${entry.userId}>`);
-      });
-    }
+    const spectatorBackups = formatBackupsLine(spectator.backups, 10);
+    if (spectatorBackups) lines.push(spectatorBackups);
   }
 
-  lines.push('');
+  // Supervisors (optional)
+  if (supervisor.sorted.length) {
+    lines.push('', '🟢  Supervisors 🟢');
+
+    if (supervisor.selected.length === 0) {
+      lines.push('None selected.');
+    } else {
+      supervisor.selected.forEach((entry, idx) => {
+        lines.push(`${idx + 1}. <@${entry.userId}>`);
+      });
+    }
+
+    const supervisorBackups = formatBackupsLine(supervisor.backups, 10);
+    if (supervisorBackups) lines.push(supervisorBackups);
+  }
+
+  lines.push('', '────────────', '');
   lines.push(
     '🧊 You should now join! Please join within **5 minutes**, or your spot will be given to someone else.',
   );
@@ -612,9 +715,15 @@ function buildLiveAttendeesMessage(queue) {
     );
   }
 
-  return lines.join('\n');
-}
+  let msg = lines.join('\\n');
 
+  // Discord message hard limit safety
+  if (msg.length > 1950) {
+    msg = msg.slice(0, 1940) + '\\n…';
+  }
+
+  return msg;
+}
 /**
  * LIVE attendees post in the queue channel (with pings).
  */
@@ -623,8 +732,7 @@ async function postLiveAttendeesForQueue(client, queue) {
 
   const channel = await client.channels.fetch(queue.channelId).catch(() => null);
   if (!channel) return;
-
-  const content = buildLiveAttendeesMessage(queue);
+  const content = buildLiveAttendeesMessage(queue, client.priorityStore);
   const message = await channel.send({ content });
 
   queue.attendeesMessageId = message.id;
@@ -634,7 +742,9 @@ async function postLiveAttendeesForQueue(client, queue) {
 /**
  * Log attendees into the log channel as an embed (usernames only).
  */
-async function logAttendeesForCard(client, cardOptionOrShortId) {
+async function logAttendeesForCard(client, cardOptionOrShortId, options = {}) {
+  const { recordAttendance = false } = options;
+
   const shortId = extractShortId(cardOptionOrShortId);
   if (!shortId) {
     console.warn('[LOG] Could not parse shortId from', cardOptionOrShortId);
@@ -648,21 +758,44 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
   }
 
   const logChannelId = SESSION_ATTENDEES_LOG_CHANNEL_ID || queue.channelId;
-  const logChannel = await client.channels
-    .fetch(logChannelId)
-    .catch(() => null);
+  const logChannel = await client.channels.fetch(logChannelId).catch(() => null);
   if (!logChannel) {
     console.warn('[LOG] Could not fetch log channel for attendees');
     return;
   }
 
-  const sorted = {
-    cohost: sortRoleEntries(queue.roles.cohost),
-    overseer: sortRoleEntries(queue.roles.overseer),
-    interviewer: sortRoleEntries(queue.roles.interviewer),
-    spectator: sortRoleEntries(queue.roles.spectator),
-    supervisor: sortRoleEntries(queue.roles.supervisor),
-  };
+  const guildId = queue.guildId || 'global';
+
+  const cohost = splitSelected(
+    queue.roles.cohost,
+    getRoleLimit(queue, 'cohost'),
+    client.priorityStore,
+    guildId,
+  );
+  const overseer = splitSelected(
+    queue.roles.overseer,
+    getRoleLimit(queue, 'overseer'),
+    client.priorityStore,
+    guildId,
+  );
+  const main = splitSelected(
+    queue.roles.interviewer,
+    getRoleLimit(queue, 'interviewer'),
+    client.priorityStore,
+    guildId,
+  );
+  const spectator = splitSelected(
+    queue.roles.spectator,
+    getRoleLimit(queue, 'spectator'),
+    client.priorityStore,
+    guildId,
+  );
+  const supervisor = splitSelected(
+    queue.roles.supervisor,
+    getRoleLimit(queue, 'supervisor'),
+    client.priorityStore,
+    guildId,
+  );
 
   async function usernamesFromEntries(entries) {
     const results = [];
@@ -680,46 +813,34 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
   const [
     cohostNames,
     overseerNames,
-    interviewerNames,
+    mainNames,
     spectatorNames,
     supervisorNames,
   ] = await Promise.all([
-    usernamesFromEntries(sorted.cohost),
-    usernamesFromEntries(sorted.overseer),
-    usernamesFromEntries(sorted.interviewer),
-    usernamesFromEntries(sorted.spectator),
-    usernamesFromEntries(sorted.supervisor),
+    usernamesFromEntries(cohost.selected),
+    usernamesFromEntries(overseer.selected),
+    usernamesFromEntries(main.selected),
+    usernamesFromEntries(spectator.selected),
+    usernamesFromEntries(supervisor.selected),
   ]);
 
   const fields = [];
 
-  fields.push({
-    name: 'Session Info',
-    value:
-      [
-        queue.cardName ? `• **Card:** ${queue.cardName}` : null,
-        queue.timeText ? `• **Time:** ${queue.timeText}` : null,
-        queue.cardUrl ? `• **Trello:** ${queue.cardUrl}` : null,
-      ]
-        .filter(Boolean)
-        .join('\n') || 'No additional details.',
-  });
-
+  // Host
   fields.push({
     name: 'Host',
-    value: queue.hostName || (queue.hostId ? queue.hostId : 'Unknown'),
-    inline: true,
+    value: queue.hostId ? `<@${queue.hostId}>` : queue.hostName || 'Unknown',
   });
 
   fields.push({
     name: 'Co-Host',
-    value: cohostNames.length ? cohostNames.join('\n') : 'None',
+    value: cohostNames.length ? cohostNames.join('\\n') : 'None',
     inline: true,
   });
 
   fields.push({
     name: 'Overseer',
-    value: overseerNames.length ? overseerNames.join('\n') : 'None',
+    value: overseerNames.length ? overseerNames.join('\\n') : 'None',
     inline: true,
   });
 
@@ -732,8 +853,8 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
 
   fields.push({
     name: mainRoleTitle,
-    value: interviewerNames.length
-      ? interviewerNames.map((n, i) => `${i + 1}. ${n}`).join('\n')
+    value: mainNames.length
+      ? mainNames.map((n, i) => `${i + 1}. ${n}`).join('\\n')
       : 'None',
   });
 
@@ -741,7 +862,7 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
     fields.push({
       name: 'Spectators',
       value: spectatorNames.length
-        ? spectatorNames.map((n, i) => `${i + 1}. ${n}`).join('\n')
+        ? spectatorNames.map((n, i) => `${i + 1}. ${n}`).join('\\n')
         : 'None',
       inline: true,
     });
@@ -750,15 +871,13 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
   if (supervisorNames.length) {
     fields.push({
       name: 'Supervisors',
-      value: supervisorNames.map((n, i) => `${i + 1}. ${n}`).join('\n'),
+      value: supervisorNames.map((n, i) => `${i + 1}. ${n}`).join('\\n'),
       inline: true,
     });
   }
 
   const now = new Date();
-  const loggedAt = now.toLocaleString('en-US', {
-    timeZone: 'America/Toronto',
-  });
+  const loggedAt = now.toLocaleString('en-US', { timeZone: 'America/Toronto' });
 
   const logEmbed = new EmbedBuilder()
     .setTitle('Session Attendees Logged')
@@ -767,10 +886,38 @@ async function logAttendeesForCard(client, cardOptionOrShortId) {
     .setColor(0x6cb2eb);
 
   await logChannel.send({ embeds: [logEmbed] });
+
+  // Update priority store ONLY when this is a completed session (not cancellations).
+  if (
+    recordAttendance &&
+    client.priorityStore &&
+    typeof client.priorityStore.recordAttendance === 'function'
+  ) {
+    const attendedIds = [
+      ...cohost.selected,
+      ...overseer.selected,
+      ...main.selected,
+      ...(queue.sessionType !== 'massshift' ? spectator.selected : []),
+      ...supervisor.selected,
+    ]
+      .map((e) => e.userId)
+      .filter(Boolean)
+      .filter((id) => id !== queue.hostId);
+
+    client.priorityStore.recordAttendance(guildId, attendedIds, {
+      shortId,
+      cardName: queue.cardName,
+      sessionType: queue.sessionType,
+    });
+
+    console.log(
+      `[PRIORITY] Recorded attendance for ${attendedIds.length} user(s) (guild: ${guildId}).`,
+    );
+  }
 }
 
-/**
- * Clean up queue + attendees posts and forget the queue.
+ /**
+  * Clean up queue + attendees posts and forget the queue.
  */
 async function cleanupQueueForCard(client, cardOptionOrShortId) {
   const shortId = extractShortId(cardOptionOrShortId);
@@ -839,7 +986,7 @@ async function handleQueueButtonInteraction(interaction) {
 
     // decision === 'yes'
     try {
-      await logAttendeesForCard(interaction.client, shortId);
+      await logAttendeesForCard(interaction.client, shortId, { recordAttendance: false });
       await cleanupQueueForCard(interaction.client, shortId);
 
       await interaction
