@@ -147,6 +147,28 @@ client.once(Events.ClientReady, (c) => {
   );
 });
 
+// ===========================
+// SHARD / GATEWAY DEBUG (helps diagnose "offline on Render")
+// ===========================
+
+client.on("shardReady", (id) => console.log(`[SHARD] Ready: ${id}`));
+
+client.on("shardDisconnect", (event, id) => {
+  console.log(
+    `[SHARD] Disconnect: ${id}`,
+    event?.code,
+    event?.reason
+  );
+});
+
+client.on("shardReconnecting", (id) => console.log(`[SHARD] Reconnecting: ${id}`));
+client.on("shardResume", (id) => console.log(`[SHARD] Resumed: ${id}`));
+client.on("shardError", (err, id) => console.error(`[SHARD] Error: ${id}`, err));
+
+setTimeout(() => {
+  if (!client.isReady()) console.error("[READY] Still NOT ready after 30s.");
+}, 30_000);
+
 // Discord.js debug (OFF by default)
 const ENABLE_DISCORD_DEBUG =
   (process.env.ENABLE_DISCORD_DEBUG || "false").toLowerCase() === "true";
